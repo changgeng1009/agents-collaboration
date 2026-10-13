@@ -9,7 +9,7 @@ import { RUNTIME_ROOT, redact } from './policy.mjs';
 const { values } = parseArgs({ options: { role: { type: 'string' }, db: { type: 'string' } } });
 const role = values.role ?? process.env.COLLAB_ROLE;
 const hub = new Hub({ role, dbPath: values.db ?? process.env.COLLAB_DB_PATH ?? path.join(RUNTIME_ROOT, 'hub.sqlite') });
-const server = new McpServer({ name: 'ai-collaboration-t1', version: '0.1.2' }, { instructions: '中文协作。身份固定于本进程。普通消息不能通过任务审核。读取收件箱后须显式确认已读。产物返回实际内容；模型执行与豆包接入未启用。' });
+const server = new McpServer({ name: 'ai-collaboration-t1', version: '0.1.3' }, { instructions: '中文协作。身份固定于本进程。普通消息不能通过任务审核。读取收件箱后须显式确认已读。产物返回实际内容；模型执行与豆包接入未启用。' });
 const id = z.string().min(1).max(128);
 const request = { requestId: id };
 const ref = z.object({ artifactId: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/), version: z.number().int().positive() }).strict();

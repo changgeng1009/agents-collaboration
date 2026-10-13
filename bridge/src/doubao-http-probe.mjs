@@ -35,7 +35,7 @@ export async function startProbe({ port = 18761, instance = 'desktop_probe' } = 
     permissions: '仅读取本探针能力及现场挑战码', fileReadEnabled: false, fileWriteEnabled: false, modelExecutionEnabled: false,
     videoGenerationEnabled: false, reviewEnabled: false, automaticWakeup: false, realDoubaoClientVerified: false });
   function makeMcpServer(correlationId) {
-    const server = new McpServer({ name: 'doubao-local-readonly-probe', version: '0.1.2' }, { instructions: '仅只读探针工具。客户端名称是自报元数据，不能证明身份或执行成功。' });
+    const server = new McpServer({ name: 'doubao-local-readonly-probe', version: '0.1.3' }, { instructions: '仅只读探针工具。客户端名称是自报元数据，不能证明身份或执行成功。' });
     server.registerTool('get_capabilities', { description: '读取本地只读探针的角色、权限和传输能力', inputSchema: z.object({}).strict() }, async () => {
       const value = capabilities(); log({ event: 'tool_completed', correlationId, tool: 'get_capabilities', outputSha256: sha256(JSON.stringify(value)) });
       return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
