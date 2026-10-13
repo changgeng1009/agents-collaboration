@@ -1,0 +1,32 @@
+import './test-context.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { validateDemoOutput, verifyObservedRead, claimOnce, INPUT, EXPECTED, LIVE_LOG, LIVE_ROOT, runLiveOnce } from '../bridge/src/live-codex-once.mjs';
+import { buildExecPlan, publicExecPlan } from '../bridge/src/codex-adapter.mjs';
+import { ARTIFACT_ROOT } from '../bridge/src/policy.mjs';
+
+const runId = randomUUID();
+const dir = path.join(LIVE_ROOT, 'local-checks', runId); fs.mkdirSync(dir, { recursive: true }); fs.mkdirSync(LIVE_LOG, { recursive: true });
+const checks = [];
+function checked(name, callback) { callback(); checks.push({ name, passed: true }); }
+checked('正确中文 JSON 与三条输入独立统计一致', () => assert.deepEqual(validateDemoOutput(JSON.stringify(EXPECTED), INPUT), EXPECTED));
+checked('错误数值拒绝', () => assert.throws(() => validateDemoOutput(JSON.stringify({ ...EXPECTED, done: 2 }), INPUT), { code: 'RESULT_VALUE' }));
+checked('多余字段拒绝', () => assert.throws(() => validateDemoOutput(JSON.stringify({ ...EXPECTED, extra: true }), INPUT), { code: 'RESULT_KEYS' }));
+checked('输入变化拒绝', () => assert.throws(() => validateDemoOutput(JSON.stringify(EXPECTED), []), { code: 'INPUT_MISMATCH' }));
+const marker = path.join(LIVE_LOG, `local-claim-check-${runId}.json`);
+claimOnce(marker, { fixtureOnly: true, realExecStarts: 0 });
+checked('第二次启动占位被 wx 独占拒绝', () => assert.throws(() => claimOnce(marker, { fixtureOnly: true }), { code: 'EEXIST' }));
+const promptFile = path.join(dir, 'fixture-prompt.txt'); fs.writeFileSync(promptFile, '纯本地入口验证，不启动模型。', 'utf8');
+const schema = path.join(dir, 'fixture-schema.json'); fs.writeFileSync(schema, '{}', 'utf8');
+const plan = buildExecPlan({ taskId: 'count-demo-fixture', workspace: dir, promptFile, outputDirectory: path.join(ARTIFACT_ROOT, 'codex-runs', 'local-plan-check'), sandbox: 'read-only', outputSchema: schema });
+checked('只读参数、官方路由与输出 schema 实际进入计划', () => { assert.equal(plan.argv[plan.argv.indexOf('--sandbox') + 1], 'read-only'); assert.ok(plan.argv.includes('--ignore-user-config')); assert.ok(plan.argv.includes('model_provider="openai"')); assert.equal(plan.argv[plan.argv.indexOf('--output-schema') + 1], schema); assert.equal(Object.hasOwn(publicExecPlan(plan), 'env'), false); });
+const event = JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: "Get-Content -LiteralPath 'tasks.json' -Raw -Encoding utf8", aggregated_output: JSON.stringify(INPUT), exit_code: 0 } });
+checked('实际读取证据必须匹配原输入', () => assert.equal(verifyObservedRead(event, 'fixture/tasks.json', Buffer.from(JSON.stringify(INPUT))).observedInputMatches, true));
+checked('没有文件读取记录不得验收', () => assert.throws(() => verifyObservedRead('', 'fixture/tasks.json', Buffer.from(JSON.stringify(INPUT))), { code: 'READ_COMMAND_COUNT' }));
+checked('读到不同清单不得验收', () => assert.throws(() => verifyObservedRead(event.replace(JSON.stringify(INPUT).replaceAll('"', '\\"'), '[]'), 'fixture/tasks.json', Buffer.from(JSON.stringify(INPUT))), { code: 'OBSERVED_INPUT_MISMATCH' }));
+await assert.rejects(() => runLiveOnce(), { code: 'DEMO_NOT_AUTHORIZED' });
+checks.push({ name: '缺少授权时实际运行入口在任何进程启动前拒绝', passed: true });
+fs.writeFileSync(path.join(LIVE_LOG, 'local-preflight-tests.json'), JSON.stringify({ status: 'passed', runId, checks, realExecStarts: 0, fixtureOnly: true }, null, 2), 'utf8');
+console.log(`纯本地 ${checks.length} 项预检通过；真实 exec 启动 0。`);

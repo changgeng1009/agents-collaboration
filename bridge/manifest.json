@@ -1,0 +1,30 @@
+{
+  "manifest_version": "0.3",
+  "name": "ai-collaboration-t1",
+  "display_name": "AI 协作站：T1 本地通信桥",
+  "version": "0.1.2",
+  "description": "本地任务派单、双向问答、产物读取与版本审核。",
+  "long_description": "本地任务、消息与版本产物通信桥。访问范围限定于进程配置的项目根目录，规划与审核角色固定。生成、自动唤醒与完整业务编排未启用。运行时要求 Node 24。",
+  "author": { "name": "AI 协作站项目" },
+  "server": {
+    "type": "node",
+    "entry_point": "src/server.mjs",
+    "mcp_config": {
+      "command": "${user_config.node_executable}",
+      "args": ["${__dirname}/src/server.mjs", "--role", "claude"],
+      "env": { "COLLAB_PROJECT_ROOT": "${user_config.project_root}" }
+    }
+  },
+  "tools_generated": true,
+  "compatibility": { "platforms": ["win32"], "runtimes": { "node": ">=24.0.0" } },
+  "user_config": {
+    "node_executable": {
+      "type": "file",
+      "title": "Node 24 程序路径",
+      "description": "本地 Node 24 或更高版本的程序文件。",
+      "required": true
+    },
+    "project_root": { "type": "directory", "title": "授权项目目录", "description": "本进程的任务、消息和产物访问根目录。", "required": true }
+  },
+  "privacy_policies": []
+}
