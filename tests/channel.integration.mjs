@@ -91,7 +91,7 @@ try {
   const [initP, initX] = await Promise.all([planner.init(), executor.init()]);
   check('两个独立 stdio 进程完成 initialize', () => { assert.equal(initP.serverInfo.name, 'ai-collaboration-t1'); assert.equal(initX.serverInfo.name, 'ai-collaboration-t1'); });
   const listed = await planner.request('tools/list');
-  check('真实 tools/list 返回 12 项工具', () => assert.equal(listed.tools.length, 12));
+  check('真实 tools/list 保留 12 项原工具并新增六项会话工具', () => assert.equal(listed.tools.length, 18));
   const capabilities = await planner.call('get_capabilities');
   check('模型执行与豆包能力保持关闭', () => { assert.equal(capabilities.modelExecutionEnabled, false); assert.equal(capabilities.doubaoEnabled, false); });
   currentPhase = 'fresh_database_concurrent_startup';

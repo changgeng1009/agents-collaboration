@@ -46,7 +46,7 @@ try {
   let manager = new PeerClient('manager', 'manager'), buddy = new PeerClient('workbuddy', 'workbuddy');
   await Promise.all([manager.connect(), buddy.connect()]);
   const tools = await buddy.client.listTools();
-  check('两个真实 stdio 进程握手并且仅暴露七个伙伴工具', () => { assert.equal(tools.tools.length, 7); assert.equal(buddy.client.getServerVersion().version, '0.1.3'); });
+  check('两个真实 stdio 进程保留七个伙伴工具并新增六项会话工具', () => { assert.equal(tools.tools.length, 13); assert.equal(buddy.client.getServerVersion().version, '0.1.4'); });
   const caps = await buddy.call('get_capabilities');
   check('固定 workbuddy、独立数据库、无执行审核发布', () => { assert.equal(caps.role, 'workbuddy'); assert.ok(caps.dbPath.includes('partner-channel')); assert.equal(caps.shellEnabled, false); assert.equal(caps.reviewEnabled, false); assert.equal(caps.automaticManagerAck, false); });
   const startupClients = [];

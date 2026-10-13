@@ -86,7 +86,7 @@ export class Hub {
   }
   capabilities() {
     return { projectId: PROJECT_ID, role: this.role, dbPath: this.dbPath, artifactRoot: ARTIFACT_ROOT,
-      transport: 'stdio', persistence: 'sqlite-wal', modelExecutionEnabled: false, doubaoEnabled: false,
+      transport: 'stdio', persistence: 'sqlite-wal', modelExecutionEnabled: false, modelExecutionScope: 'original_codex_adapter', sessionControlCapabilityTool: 'get_session_capabilities', doubaoEnabled: false,
       automaticWakeup: false, clientConnectionVerified: false,
       statusLabels: { queued: '已入队', delivered: '已送达本地接收进程', read: '接收方已确认读取', executed: '接收方已登记执行', assigned: '已派发', in_progress: '执行中', awaiting_review: '待审核', approved: '已通过当前版本审核' } };
   }

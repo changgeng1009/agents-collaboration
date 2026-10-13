@@ -10,10 +10,12 @@ export const PUBLIC_FILES = [
   'bridge/src/policy.mjs', 'bridge/src/store.mjs', 'bridge/src/server.mjs',
   'bridge/src/codex-adapter.mjs', 'bridge/src/live-codex-once.mjs', 'bridge/src/doubao-http-probe.mjs',
   'bridge/src/partner-store.mjs', 'bridge/src/partner-server.mjs',
+  'bridge/src/session-capabilities.mjs', 'bridge/src/claude-code-adapter.mjs', 'bridge/src/session-store.mjs', 'bridge/src/session-tools.mjs', 'bridge/src/stdio-audit.mjs',
   'bridge/scripts/call-tool.mjs', 'bridge/scripts/package-extension.mjs', 'bridge/scripts/start-doubao-probe.ps1',
   'bridge/scripts/call-partner-tool.mjs',
   'tests/test-context.mjs', 'tests/channel.integration.mjs', 'tests/doubao-http-probe.integration.mjs',
-  'tests/live-codex-preflight.mjs', 'tests/extension.smoke.mjs', 'tests/partner-channel.integration.mjs', 'scripts/check-public-files.mjs'
+  'tests/live-codex-preflight.mjs', 'tests/extension.smoke.mjs', 'tests/partner-channel.integration.mjs',
+  'tests/session-protocol-fixture.mjs', 'tests/session-fixture-server.mjs', 'tests/session-control.integration.mjs', 'tests/stdio-audit.integration.mjs', 'scripts/check-public-files.mjs'
 ];
 
 const root = path.resolve(fileURLToPath(new URL('../', import.meta.url)));

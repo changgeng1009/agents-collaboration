@@ -5,11 +5,12 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import * as z from 'zod/v4';
 import { Hub } from './store.mjs';
 import { RUNTIME_ROOT, redact } from './policy.mjs';
+import { registerSessionTools } from './session-tools.mjs';
 
 const { values } = parseArgs({ options: { role: { type: 'string' }, db: { type: 'string' } } });
 const role = values.role ?? process.env.COLLAB_ROLE;
 const hub = new Hub({ role, dbPath: values.db ?? process.env.COLLAB_DB_PATH ?? path.join(RUNTIME_ROOT, 'hub.sqlite') });
-const server = new McpServer({ name: 'ai-collaboration-t1', version: '0.1.3' }, { instructions: '中文协作。身份固定于本进程。普通消息不能通过任务审核。读取收件箱后须显式确认已读。产物返回实际内容；模型执行与豆包接入未启用。' });
+const server = new McpServer({ name: 'ai-collaboration-t1', version: '0.1.4' }, { instructions: '中文协作。身份固定于本进程。原任务、消息、产物工具权限不变；普通消息不能通过审核。独立会话控制默认关闭；模式、目录与文件/操作系统边界分别查看 get_session_capabilities。不能把 Code 会话冒充普通桌面上下文。' });
 const id = z.string().min(1).max(128);
 const request = { requestId: id };
 const ref = z.object({ artifactId: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/), version: z.number().int().positive() }).strict();
@@ -30,7 +31,7 @@ const tools = [
 for (const [name, description, shape, handler] of tools) {
   server.registerTool(name, { description, inputSchema: z.object(shape).strict() }, async args => {
     try {
-      const output = handler(args);
+      const output = await handler(args);
       if (output.content) return output;
       return { content: [{ type: 'text', text: JSON.stringify(output) }], structuredContent: output };
     } catch (error) {
@@ -39,6 +40,7 @@ for (const [name, description, shape, handler] of tools) {
   });
 }
 const transport = new StdioServerTransport();
-transport.onclose = () => { hub.close(); };
+const sessionTools = registerSessionTools(server, { actor: role });
+transport.onclose = () => { hub.close(); sessionTools.close(); };
 await server.connect(transport);
 console.error(`协作桥已启动：role=${role}，仅 stdio，无自动模型请求。`);
