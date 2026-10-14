@@ -66,7 +66,7 @@ export class PartnerStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   capabilities() {
-    return { projectId: PROJECT_ID, role: this.role, channel: 'partner-channel', version: '0.1.5', persistence: 'separate-sqlite-wal', dbPath: this.dbPath,
+    return { projectId: PROJECT_ID, role: this.role, channel: 'partner-channel', version: '0.1.6', persistence: 'separate-sqlite-wal', dbPath: this.dbPath,
       artifactRoot: PARTNER_ARTIFACT_ROOT, textByteLimit: TEXT_LIMIT, permissions: ['peer_messages', 'explicit_read_ack', 'versioned_text'],
       permissionsScope: 'partner_messages_and_versioned_text', sessionControlCapabilityTool: 'get_session_capabilities',
       arbitraryFileRead: false, shellEnabled: false, modelExecutionEnabled: false, reviewEnabled: false, publishEnabled: false,

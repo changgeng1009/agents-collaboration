@@ -9,6 +9,7 @@ const modes = {
   },
   workbuddy: {
     desktop: ['unknown', 'CAPABILITY_UNVERIFIED', '桌面入口、身份与请求 cwd 生效未验证。', 'desktop_storage_unverified', false],
+    codebuddy_cli: ['documented', 'ADAPTER_DISABLED', '独立 CodeBuddy CLI 文本会话；桌面旧聊天、登录复用与专家能力另行验收。', 'local_cli_records', true],
     localassistant: ['documented_partial', 'CONVERSATION_BINDING_UNAVAILABLE', '公开接口返回 message_id，未公开目标会话编号和 cwd 绑定。', 'pc_assistant_storage_unverified', false],
     cloud: ['documented', 'LOCAL_DIRECTORY_UNSUPPORTED', '云端 task_id 是真实会话编号；本机目录绑定和应用准入未验收。', 'cloud_sandbox', false],
     codebuddy_http: ['documented', 'PRODUCT_MODE_UNVERIFIED', 'CodeBuddy HTTP Beta 不等于桌面原会话；目录和身份未验收。', 'local_cli_records', false],
@@ -25,19 +26,20 @@ const modes = {
 export function sessionCapability(platform, mode, configuration = {}, runtimeVerified = false) {
   const entry = modes[platform]?.[mode];
   const [documentedStatus, baseCode, reason, storageKind, cwdDocumented] = entry ?? ['unknown', 'MODE_UNVERIFIED', '该平台与产品模式未核实，不能自动切换。', 'unverified', false];
-  const enabled = platform === 'claude' && mode === 'code_cli' && configuration.enabled === true && configuration.acceptedProductMode === true;
-  const disabledReason = platform === 'claude' && mode === 'code_cli' && configuration.acceptedProductMode === true
-    ? '已接受独立 Code 文本模式；适配器尚未启用，真实运行与账号权益未验证。' : reason;
+  const independentCli = (platform === 'claude' && mode === 'code_cli') || (platform === 'workbuddy' && mode === 'codebuddy_cli');
+  const enabled = independentCli && configuration.enabled === true && configuration.acceptedProductMode === true;
+  const disabledReason = independentCli && configuration.acceptedProductMode === true
+    ? (platform === 'claude' ? '已接受独立 Code 文本模式；适配器尚未启用，真实运行与账号权益未验证。' : '已接受独立 CodeBuddy 文本模式；适配器尚未启用，真实运行与账号权益未验证。') : reason;
   return { platform, mode, documentedStatus, enabled, runtimeVerified: enabled && runtimeVerified,
     conversationId: null, storageKind, authenticationStatus: 'unverified', accountEntitlementStatus: 'unverified', evidenceLevel: runtimeVerified ? 'real_runtime' : 'documentation_only',
     workingDirectory: { documented: cwdDocumented, status: runtimeVerified ? 'runtime_verified' : 'not_runtime_verified', runtimeVerified: enabled && runtimeVerified, evidence: '原生进程 cwd 与 init.cwd 必须独立核对。' },
     fileAccessBoundary: { status: 'unverified', verified: false, evidence: '桥的路径防护和禁用工具不构成整个平台文件隔离。' },
     osIsolation: { status: 'unverified', verified: false },
-    productModeAccepted: platform === 'claude' && mode === 'code_cli' ? configuration.acceptedProductMode === true : null,
+    productModeAccepted: independentCli ? configuration.acceptedProductMode === true : null,
     disabledCode: enabled ? null : baseCode, disabledReason: enabled ? null : disabledReason,
-    textOnly: platform === 'claude' && mode === 'code_cli', automaticRetry: false, automaticRetryScope: 'controller_resubmission_only', cliInternalRetryStatus: 'unknown', automaticModeSwitch: false };
+    textOnly: independentCli, automaticRetry: false, automaticRetryScope: 'controller_resubmission_only', cliInternalRetryStatus: 'unknown', automaticModeSwitch: false };
 }
 
-export function allSessionCapabilities(configuration = {}, verified = () => false) {
-  return Object.entries(modes).flatMap(([platform, entries]) => Object.keys(entries).map(mode => sessionCapability(platform, mode, configuration, verified(platform, mode))));
+export function allSessionCapabilities(configuration = {}, verified = () => false, codeBuddyConfiguration = {}) {
+  return Object.entries(modes).flatMap(([platform, entries]) => Object.keys(entries).map(mode => sessionCapability(platform, mode, platform === 'workbuddy' ? codeBuddyConfiguration : configuration, verified(platform, mode))));
 }

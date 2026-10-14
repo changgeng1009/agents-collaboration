@@ -26,6 +26,9 @@
 !/bridge/src/partner-store.mjs
 !/bridge/src/partner-server.mjs
 !/bridge/src/session-capabilities.mjs
+!/bridge/src/codebuddy-cli-adapter.mjs
+!/bridge/src/codebuddy-audit.mjs
+!/bridge/src/codebuddy-probe-server.mjs
 !/bridge/src/claude-code-adapter.mjs
 !/bridge/src/session-store.mjs
 !/bridge/src/session-tools.mjs
@@ -46,6 +49,9 @@
 !/tests/session-protocol-fixture.mjs
 !/tests/session-fixture-server.mjs
 !/tests/session-control.integration.mjs
+!/tests/codebuddy-session.integration.mjs
+!/tests/codebuddy-fixture-server.mjs
+!/tests/codebuddy-protocol-fixture.cjs
 !/tests/stdio-audit.integration.mjs
 !/tests/cowork-file-loop.integration.mjs
 !/scripts/check-public-files.mjs

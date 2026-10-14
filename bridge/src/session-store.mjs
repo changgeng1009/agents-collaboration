@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { PROJECT_ROOT, SOURCE_ROOT, RUNTIME_ROOT, guardedPath, fail, sha256 } from './policy.mjs';
 import { sessionCapability, allSessionCapabilities } from './session-capabilities.mjs';
 import { readSessionConfiguration, ClaudeCodeTextAdapter, sanitizeSessionValue } from './claude-code-adapter.mjs';
+import { readCodeBuddyConfiguration, CodeBuddyCliAdapter } from './codebuddy-cli-adapter.mjs';
 
 export const SESSION_RUNTIME_ROOT = path.join(RUNTIME_ROOT, 'session-control');
 export const TASK_WORKSPACE_ROOT = path.join(PROJECT_ROOT, 'task-workspaces');
@@ -132,16 +133,16 @@ export class SessionController {
     return this.db.prepare('SELECT value FROM controlled_sessions').all().some(row => { const session = JSON.parse(row.value); return session.platform === platform && session.mode === mode && session.runtimeVerified === true && session.evidenceLevel === 'real_runtime'; });
   }
   capabilities({ platform, mode }) {
-    const configuration = readSessionConfiguration();
-    if (platform === undefined && mode === undefined) return { capabilities: allSessionCapabilities(configuration, (p, m) => this.runtimeVerified(p, m)), automaticRetry: false };
+    if (platform === undefined && mode === undefined) return { capabilities: allSessionCapabilities(readSessionConfiguration(), (p, m) => this.runtimeVerified(p, m), readCodeBuddyConfiguration()), automaticRetry: false };
     if (!platform || !mode) fail('EXPLICIT_MODE_REQUIRED', '平台和模式须同时明确，不自动切换。');
+    const configuration = platform === 'workbuddy' ? readCodeBuddyConfiguration() : readSessionConfiguration();
     return sessionCapability(platform, mode, configuration, this.runtimeVerified(platform, mode));
   }
   adapter(args) {
-    if (this.testAdapter && args.platform === 'claude' && args.mode === 'code_cli') return this.testAdapter;
-    const configuration = readSessionConfiguration(), capability = sessionCapability(args.platform, args.mode, configuration);
+    if (this.testAdapter && args.platform === (this.testAdapter.platform ?? 'claude') && args.mode === (this.testAdapter.mode ?? 'code_cli')) return this.testAdapter;
+    const configuration = args.platform === 'workbuddy' ? readCodeBuddyConfiguration() : readSessionConfiguration(), capability = sessionCapability(args.platform, args.mode, configuration);
     if (!capability.enabled) { const error = new Error(capability.disabledReason); error.code = capability.disabledCode; error.capability = capability; throw error; }
-    return new ClaudeCodeTextAdapter(configuration);
+    return args.platform === 'workbuddy' && args.mode === 'codebuddy_cli' ? new CodeBuddyCliAdapter(configuration) : new ClaudeCodeTextAdapter(configuration);
   }
   binding(args, { allowNull = false } = {}) {
     checkTaskId(args.taskId); nativeId(args.conversationId, allowNull);
@@ -170,7 +171,8 @@ export class SessionController {
     }
     if (operation === 'send_to_conversation') this.binding(args);
     const adapter = this.adapter(args);
-    const plan = adapter.prepare(workspace.cwd, operation === 'create_conversation' ? null : args.conversationId);
+    const plannedTurnId = randomUUID();
+    const plan = adapter.prepare(workspace.cwd, operation === 'create_conversation' ? null : args.conversationId, { turnId: plannedTurnId });
     const claim = this.transaction(() => {
       const request = this.request(operation, args);
       if (request.previous) return { replay: this.replay(request.previous) };
@@ -185,7 +187,7 @@ export class SessionController {
         session = this.binding(args).session;
         if (session.activeTurnId || session.status !== 'ready') fail('CONVERSATION_NOT_READY', '会话有在途轮次或未知/失败结果，禁止再次发送。');
       }
-      const turn = { taskId: args.taskId, turnId: randomUUID(), requestId: args.requestId, operation, status: 'reserved', claimedAt: now(), ownerPid: process.pid,
+      const turn = { taskId: args.taskId, turnId: plannedTurnId, requestId: args.requestId, operation, status: 'reserved', claimedAt: now(), ownerPid: process.pid,
         conversationId: session.conversationId, cwd: workspace.cwd, evidenceLevel: adapter.evidenceLevel, processStarted: false,
         modelRequestState: adapter.evidenceLevel === 'local_test' ? 'not_model_local_test' : 'unknown', modelUsage: 'unknown', cliInternalRetryStatus: 'unknown', result: null };
       session.status = 'pending'; session.activeTurnId = turn.turnId; session.lastTurnId = turn.turnId;
@@ -211,7 +213,7 @@ export class SessionController {
       fs.writeFileSync(scopedPath(path.join(inputDirectory, 'request.json'), { mustExist: false }), JSON.stringify(sanitizeSessionValue({ ...args, promptSha256: sha256(Buffer.from(args.prompt, 'utf8')) }), null, 2), { flag: 'wx' });
       fs.writeFileSync(scopedPath(path.join(inputDirectory, 'launch-plan.json'), { mustExist: false }), JSON.stringify({ command: plan.command, args: plan.args, cwd: plan.cwd, shell: false, windowsHide: true, timeoutMs: plan.timeoutMs, envValuesLogged: false, evidenceLevel: adapter.evidenceLevel }, null, 2), { flag: 'wx' });
       this.verifyWorkspace(workspace);
-      result = await adapter.run({ plan, prompt: args.prompt, workDirectory, onSpawn: pid => this.transaction(() => {
+      result = await adapter.run({ plan, prompt: args.prompt, workDirectory, inputDirectory, onSpawn: pid => this.transaction(() => {
         const current = this.turn(turn.turnId); current.status = 'running'; current.childPid = pid; current.processStarted = true; current.processStartedAt = now(); this.putTurn(current); this.event('process_started', current);
       }) });
       this.verifyWorkspace(workspace);
@@ -231,6 +233,7 @@ export class SessionController {
       }
       current.status = result.status; current.finishedAt = now(); current.result = sanitizeSessionValue(result); current.inputDirectory = inputDirectory ?? null; current.workDirectory = workDirectory ?? null; current.outputDirectory = outputDirectory ?? null;
       current.modelUsage = result.result?.usage ?? 'unknown';
+      if (session.platform === 'workbuddy' && session.mode === 'codebuddy_cli') current.modelRequestState = result.modelRequestState ?? (adapter.evidenceLevel === 'local_test' ? 'not_model_local_test' : 'unknown');
       current.evidenceFiles = [workDirectory, outputDirectory].filter(directory => directory && fs.existsSync(directory)).flatMap(directory => fs.readdirSync(directory).map(name => { const file = scopedPath(path.join(directory, name)); return { file, sha256: sha256(fs.readFileSync(file)) }; }));
       session.status = result.status === 'succeeded' ? 'ready' : result.status; session.activeTurnId = result.status === 'succeeded' ? null : turn.turnId;
       session.workingDirectoryVerified = result.workingDirectoryVerified === true; session.runtimeVerified = adapter.evidenceLevel === 'real_runtime' && result.status === 'succeeded';
