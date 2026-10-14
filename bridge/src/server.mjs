@@ -10,7 +10,7 @@ import { registerSessionTools } from './session-tools.mjs';
 const { values } = parseArgs({ options: { role: { type: 'string' }, db: { type: 'string' } } });
 const role = values.role ?? process.env.COLLAB_ROLE;
 const hub = new Hub({ role, dbPath: values.db ?? process.env.COLLAB_DB_PATH ?? path.join(RUNTIME_ROOT, 'hub.sqlite') });
-const server = new McpServer({ name: 'ai-collaboration-t1', version: '0.1.7' }, { instructions: '中文协作。身份固定于本进程。原任务、消息、产物工具权限不变；普通消息不能通过审核。独立会话控制默认关闭；模式、目录与文件/操作系统边界分别查看 get_session_capabilities。不能把 Code 会话冒充普通桌面上下文。' });
+const server = new McpServer({ name: 'ai-collaboration-t1', version: '0.1.8' }, { instructions: '中文协作。身份固定于本进程。原任务、消息、产物工具权限不变；普通消息不能通过审核。独立会话控制默认关闭；模式、目录与文件/操作系统边界分别查看 get_session_capabilities。不能把 Code 会话冒充普通桌面上下文。' });
 const id = z.string().min(1).max(128);
 const request = { requestId: id };
 const ref = z.object({ artifactId: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/), version: z.number().int().positive() }).strict();

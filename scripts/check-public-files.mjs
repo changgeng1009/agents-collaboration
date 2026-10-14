@@ -13,6 +13,7 @@ export const PUBLIC_FILES = [
   'bridge/src/session-capabilities.mjs', 'bridge/src/claude-code-adapter.mjs', 'bridge/src/session-store.mjs', 'bridge/src/session-tools.mjs', 'bridge/src/stdio-audit.mjs',
   'bridge/src/codebuddy-cli-adapter.mjs', 'bridge/src/codebuddy-audit.mjs', 'bridge/src/codebuddy-probe-server.mjs',
   'bridge/src/cowork-store.mjs', 'bridge/src/cowork-server.mjs',
+  'bridge/src/task-loop-store.mjs', 'bridge/src/task-loop-server.mjs',
   'bridge/scripts/call-tool.mjs', 'bridge/scripts/package-extension.mjs', 'bridge/scripts/start-doubao-probe.ps1',
   'bridge/scripts/call-partner-tool.mjs',
   'bridge/scripts/call-cowork-tool.mjs',
@@ -20,7 +21,7 @@ export const PUBLIC_FILES = [
   'tests/live-codex-preflight.mjs', 'tests/extension.smoke.mjs', 'tests/partner-channel.integration.mjs',
   'tests/session-protocol-fixture.mjs', 'tests/session-fixture-server.mjs', 'tests/session-control.integration.mjs', 'tests/stdio-audit.integration.mjs',
   'tests/codebuddy-session.integration.mjs', 'tests/codebuddy-fixture-server.mjs', 'tests/codebuddy-protocol-fixture.cjs',
-  'tests/cowork-file-loop.integration.mjs', 'scripts/check-public-files.mjs'
+  'tests/cowork-file-loop.integration.mjs', 'tests/task-loop.integration.mjs', 'scripts/check-public-files.mjs'
 ];
 
 const root = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
