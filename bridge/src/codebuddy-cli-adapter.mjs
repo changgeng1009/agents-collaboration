@@ -89,16 +89,17 @@ export function buildCodeBuddyPlan(config, cwd, conversationId = null, { turnId 
 export function parseCodeBuddyEvents(events, { cwd, conversationId = null, exitCode, signal, timedOut = false, truncated = false, protocolError = false, mcpAudit = null }) {
   const inits = events.filter(item => item.type === 'system' && item.subtype === 'init'), results = events.filter(item => item.type === 'result');
   const init = inits[0], ids = [...new Set(events.map(item => item.session_id).filter(id => id !== undefined))];
-  const nativeId = inits.length === 1 && typeof init.session_id === 'string' && init.session_id.length ? init.session_id : null;
+  const nativeId = inits.length >= 1 && typeof init.session_id === 'string' && init.session_id.length ? init.session_id : null;
   let reason = timedOut ? 'TIMEOUT_UNKNOWN' : truncated ? 'OUTPUT_TRUNCATED' : protocolError ? 'PROTOCOL_INVALID' : null;
   if (!reason && events.some(item => item.type === 'control_request')) reason = 'INTERACTIVE_CONTROL_REQUIRED';
-  if (!reason && (nativeId === null || ids.some(id => typeof id !== 'string'))) reason = 'NATIVE_ID_MISSING';
-  if (!reason && (nativeId.length > 256 || nativeId.startsWith('-') || /[\x00-\x1f]/.test(nativeId))) reason = 'NATIVE_ID_INVALID';
+  if (!reason && (nativeId === null || inits.some(item => typeof item.session_id !== 'string' || !item.session_id.length) || ids.some(id => typeof id !== 'string'))) reason = 'NATIVE_ID_MISSING';
+  if (!reason && inits.some(item => item.session_id.length > 256 || item.session_id.startsWith('-') || /[\x00-\x1f]/.test(item.session_id))) reason = 'NATIVE_ID_INVALID';
   if (!reason && (ids.some(id => id !== nativeId) || (conversationId !== null && conversationId !== nativeId))) reason = 'NATIVE_ID_MISMATCH';
-  if (!reason && (typeof init.cwd !== 'string' || !path.isAbsolute(init.cwd))) reason = 'CWD_MISSING';
-  if (!reason) { try { if (!sameRealPath(init.cwd, cwd)) reason = 'CWD_MISMATCH'; } catch { reason = 'CWD_MISMATCH'; } }
-  if (!reason && (!Array.isArray(init.tools) || init.tools.length !== 1 || init.tools[0] !== CODEBUDDY_TOOL_NAME)) reason = 'TOOL_SET_VIOLATION';
-  if (!reason && (!Array.isArray(init.mcp_servers) || init.mcp_servers.length !== 1 || init.mcp_servers[0].name !== CODEBUDDY_MCP_NAME || init.mcp_servers[0].status !== 'connected')) reason = 'MCP_STATE_UNVERIFIED';
+  // 重复 init 逐条校验，不能只去重保留首条而忽略后续权限变化。
+  if (!reason && inits.some(item => typeof item.cwd !== 'string' || !path.isAbsolute(item.cwd))) reason = 'CWD_MISSING';
+  if (!reason) { try { if (inits.some(item => !sameRealPath(item.cwd, cwd))) reason = 'CWD_MISMATCH'; } catch { reason = 'CWD_MISMATCH'; } }
+  if (!reason && inits.some(item => !Array.isArray(item.tools) || item.tools.length !== 1 || item.tools[0] !== CODEBUDDY_TOOL_NAME)) reason = 'TOOL_SET_VIOLATION';
+  if (!reason && inits.some(item => !Array.isArray(item.mcp_servers) || item.mcp_servers.length !== 1 || item.mcp_servers[0]?.name !== CODEBUDDY_MCP_NAME || item.mcp_servers[0]?.status !== 'connected')) reason = 'MCP_STATE_UNVERIFIED';
   const toolUses = events.flatMap(item => item.message?.content ?? []).filter(item => item.type === 'tool_use');
   if (!reason && toolUses.some(item => item.name !== CODEBUDDY_TOOL_NAME || !item.input || typeof item.input !== 'object' || Array.isArray(item.input) || Object.keys(item.input).length)) reason = 'MCP_TOOL_VIOLATION';
   if (!reason && !mcpAudit?.verified) reason = 'MCP_AUDIT_UNVERIFIED';
@@ -111,7 +112,7 @@ export function parseCodeBuddyEvents(events, { cwd, conversationId = null, exitC
   const replies = events.filter(item => item.type === 'assistant').flatMap(item => (item.message?.content ?? []).filter(block => block.type === 'text').map(block => block.text));
   return { status: reason ? (['PROCESS_EXIT_FAILED','PLATFORM_RESULT_FAILED'].includes(reason) ? 'failed' : 'unknown') : 'succeeded', reason,
     conversationId: ['NATIVE_ID_MISSING','NATIVE_ID_MISMATCH','NATIVE_ID_INVALID','RESULT_BINDING_MISMATCH'].includes(reason) ? null : nativeId,
-    idSource: nativeId ? 'system.init.session_id' : null, observedNativeIds: ids, observedCwd: init?.cwd ?? null,
+    idSource: nativeId ? 'system.init.session_id' : null, observedNativeIds: ids, observedCwd: init?.cwd ?? null, initializationCount: inits.length,
     workingDirectoryVerified: !reason, mcpHandshakeVerified: mcpAudit?.handshakeVerified === true, mcpCallVerified: !reason && mcpAudit?.callVerified === true, mcpAudit,
     fileAccessBoundaryVerified: false, osIsolationVerified: false, desktopContextVerified: false,
     replies: sanitizeCodeBuddyValue(replies), result: results.length === 1 ? sanitizeCodeBuddyValue(results[0]) : null, exitCode, signal, timedOut, truncated };

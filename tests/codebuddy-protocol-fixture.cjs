@@ -56,10 +56,27 @@ const { pathToFileURL } = require('node:url');
     }
   }
   const emit = event=>process.stdout.write(JSON.stringify({...event,fixture_only:true})+'\n');
-  if (prompt.scenario !== 'missing_init') emit({type:'system',subtype:'init',session_id:prompt.scenario==='numeric_id'?9007199254740992:id,
+  const init={type:'system',subtype:'init',uuid:id,session_id:prompt.scenario==='numeric_id'?9007199254740992:id,
     ...(prompt.scenario==='missing_cwd'?{}:{cwd:prompt.scenario==='wrong_cwd'?path.dirname(cwd):cwd}),
     ...(prompt.scenario==='missing_tools'?{}:{tools:['builtin_tool','early_invalid_init'].includes(prompt.scenario)?['Read']:declared}),
-    ...(prompt.scenario==='missing_mcp'?{}:{mcp_servers:prompt.scenario==='extra_mcp'?[{name:'t2_candidate',status:'connected'},{name:'other',status:'connected'}]:[{name:'t2_candidate',status:prompt.scenario==='mcp_failed'?'failed':'connected'}]})});
+    ...(prompt.scenario==='missing_mcp'?{}:{mcp_servers:prompt.scenario==='extra_mcp'?[{name:'t2_candidate',status:'connected'},{name:'other',status:'connected'}]:[{name:'t2_candidate',status:prompt.scenario==='mcp_failed'?'failed':'connected'}]}),__timestamp:new Date().toISOString()};
+  if (prompt.scenario !== 'missing_init') {
+    emit(init);
+    emit({type:'system',subtype:'status',status:null,uuid:'fixture_status',session_id:id,_meta:{source:'local_test'},__timestamp:new Date().toISOString(),_requestId:'fixture_request'});
+    emit({type:'file-history-snapshot',messageId:'fixture_snapshot_message',timestamp:new Date().toISOString(),isSnapshotUpdate:false,snapshot:{trackedFileBackups:{}},_meta:{source:'local_test'},__timestamp:new Date().toISOString(),_requestId:'fixture_request'});
+    const repeated={...init,__timestamp:new Date(Date.now()+1).toISOString()};
+    if(prompt.scenario==='duplicate_id_change')repeated.session_id=id+'_changed';
+    if(prompt.scenario==='duplicate_numeric_id')repeated.session_id=9007199254740992;
+    if(prompt.scenario==='duplicate_missing_id')delete repeated.session_id;
+    if(prompt.scenario==='duplicate_cwd_change')repeated.cwd=path.dirname(cwd);
+    if(prompt.scenario==='duplicate_missing_cwd')delete repeated.cwd;
+    if(prompt.scenario==='duplicate_tool_change')repeated.tools=[...declared,'Read'];
+    if(prompt.scenario==='duplicate_missing_tools')delete repeated.tools;
+    if(prompt.scenario==='duplicate_mcp_change')repeated.mcp_servers=[{name:'other',status:'connected'}];
+    if(prompt.scenario==='duplicate_mcp_disconnected')repeated.mcp_servers=[{name:'t2_candidate',status:'disconnected'}];
+    if(prompt.scenario==='duplicate_missing_mcp')delete repeated.mcp_servers;
+    emit(repeated);
+  }
   if (prompt.scenario==='control_request') emit({type:'control_request',request:{subtype:'authenticate',authUrl:'https://example.invalid/login?token='+'fixture_secret'}});
   if (prompt.scenario==='early_invalid_init') await new Promise(resolve=>setTimeout(resolve,10000));
   if (prompt.scenario==='timeout') await new Promise(resolve=>setTimeout(resolve,10000));

@@ -1,6 +1,6 @@
 {
   "name": "ai-collaboration-t1-bridge",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "description": "T1 本地任务与消息通信桥",

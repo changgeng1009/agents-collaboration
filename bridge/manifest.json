@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "ai-collaboration-t1",
   "display_name": "AI 协作站：T1 本地通信桥",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "本地任务派单、双向问答、产物读取与版本审核。",
   "long_description": "本地任务、消息与产物通信桥，角色与桥内路径范围固定。独立会话控制默认关闭，产品模式、任务目录和平台权限分别记录；桥内路径保护不等于平台进程隔离。自动唤醒与完整业务编排未启用。运行时要求 Node 24。",
   "author": { "name": "AI 协作站项目" },
