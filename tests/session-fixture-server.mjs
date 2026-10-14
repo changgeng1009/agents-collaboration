@@ -12,7 +12,7 @@ const { values } = parseArgs({ options: { role: { type: 'string', default: 'mana
 const adapter = new ClaudeCodeTextAdapter({ enabled: true, acceptedProductMode: true, nodeExecutable: process.execPath,
   cliScript: fileURLToPath(new URL('./session-protocol-fixture.mjs', import.meta.url)), timeoutMs: 1200, maxOutputBytes: 4096 });
 adapter.evidenceLevel = 'local_test';
-const server = new McpServer({ name: 'local_session_fixture_not_platform', version: '0.1.4' });
+const server = new McpServer({ name: 'local_session_fixture_not_platform', version: '0.1.5' });
 const controller = new SessionController({ actor: values.role, testAdapter: adapter,
   testHooks: values.behavior === 'crash_after_claim' ? { afterClaim: () => process.exit(91) } : {} });
 const registered = registerSessionTools(server, { actor: values.role, controllerFactory: () => controller });

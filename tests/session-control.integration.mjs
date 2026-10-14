@@ -18,7 +18,7 @@ const check = (name, callback) => { callback(); checks.push({ name, passed: true
 class Peer {
   constructor(label, source = 'tests/session-fixture-server.mjs', role = 'manager', behavior = 'normal') { this.label = label; this.source = source; this.role = role; this.behavior = behavior; clients.push(this); }
   async connect() {
-    this.client = new Client({ name: 'local_session_test_not_platform', version: '0.1.4' });
+    this.client = new Client({ name: 'local_session_test_not_platform', version: '0.1.5' });
     this.transport = new StdioClientTransport({ command: process.execPath, args: [path.join(CODE_ROOT, this.source), '--role', this.role, ...(this.source.startsWith('tests/') ? ['--behavior', this.behavior] : [])],
       env: { ...getDefaultEnvironment(), COLLAB_PROJECT_ROOT: FIXTURE_ROOT, COLLAB_TEST_MODE: '1' }, stderr: 'pipe' });
     this.transport.stderr.on('data', bytes => fs.appendFileSync(path.join(logDir, `${this.label}-stderr.txt`), bytes));

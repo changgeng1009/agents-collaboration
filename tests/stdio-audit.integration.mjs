@@ -12,7 +12,7 @@ fs.mkdirSync(logDir, { recursive: true });
 const auditFile = path.join(logDir, 'observed.jsonl'), peers = [], checks = [];
 const check = (name, callback) => { callback(); checks.push({ name, passed: true }); };
 async function peer(label, file = null) {
-  const client = new Client({ name: `local_audit_fixture_${label}_not_workbuddy`, version: '0.1.4' });
+  const client = new Client({ name: `local_audit_fixture_${label}_not_workbuddy`, version: '0.1.5' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(CODE_ROOT, 'bridge', 'src', 'partner-server.mjs'), '--role', 'workbuddy', ...(file ? ['--audit-log', file] : [])],
     cwd: FIXTURE_ROOT, env: { ...getDefaultEnvironment(), COLLAB_PROJECT_ROOT: FIXTURE_ROOT, COLLAB_TEST_MODE: '1' }, stderr: 'pipe' });
   transport.stderr.on('data', bytes => fs.appendFileSync(path.join(logDir, `${label}-stderr.txt`), bytes)); peers.push(client);
