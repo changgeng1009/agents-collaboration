@@ -11,7 +11,7 @@ import * as z from 'zod/v4';
 import { PROJECT_ROOT, SOURCE_ROOT, fail, sha256 } from './policy.mjs';
 import { TaskLoopStore, TASK_LOOP_ROOT, LOOP_TEXT_LIMIT, loopPath, loopId } from './task-loop-store.mjs';
 
-const VERSION = '0.1.8';
+const VERSION = '0.1.9';
 const methods = new Set(['initialize', 'notifications/initialized', 'ping', 'tools/list', 'tools/call']);
 const workerTools = new Set(['get_capabilities', 'claim_task', 'submit_task_result']);
 const request = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
@@ -103,15 +103,50 @@ function readHttpBody(req) {
   });
 }
 
-export async function startTaskExecutor({ actor, taskId: boundTaskId, port = 18762, dbPath, leaseMs } = {}) {
+// 仅可信启动入口可恢复传输凭据；MCP 工具不接收此参数。原部署证据始终保留。
+function resumeRead(file, limit) {
+  const checked = loopPath(file), before = fs.lstatSync(checked, { bigint: true });
+  const ordinary = stat => stat.isFile() && stat.nlink === 1n && stat.size > 0n && stat.size <= BigInt(limit);
+  const same = stat => ordinary(stat) && ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs'].every(field => stat[field] === before[field]);
+  if (!ordinary(before)) fail('RESUME_FILE_INVALID', '恢复文件必须为有界、单链接普通文件。');
+  const descriptor = fs.openSync(checked, 'r');
+  try {
+    if (!same(fs.fstatSync(descriptor, { bigint: true }))) fail('RESUME_FILE_INVALID', '打开恢复文件时身份改变。');
+    const bytes = Buffer.alloc(Number(before.size)); let offset = 0;
+    while (offset < bytes.length) { const count = fs.readSync(descriptor, bytes, offset, bytes.length - offset, offset); if (!count) fail('RESUME_FILE_INVALID', '恢复文件未完整读取。'); offset += count; }
+    loopPath(checked);
+    if (!same(fs.fstatSync(descriptor, { bigint: true })) || !same(fs.lstatSync(checked, { bigint: true }))) fail('RESUME_FILE_INVALID', '读取恢复文件时身份改变。');
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } finally { fs.closeSync(descriptor); }
+}
+function resumeCredential(serviceFile, { actor, boundTaskId, port, dbPath }) {
+  const checked = loopPath(serviceFile), previous = JSON.parse(resumeRead(checked, 16384));
+  const id = previous.deploymentId;
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) fail('RESUME_BINDING_MISMATCH', '恢复部署编号无效。');
+  const expectedMetadata = path.join(PROJECT_ROOT, 'logs', 'task-loop', actor, id, 'service.json');
+  const expectedKey = path.join(TASK_LOOP_ROOT, 'deployments', id, 'bearer-key.txt');
+  if (checked !== expectedMetadata || previous.actor !== actor || previous.taskId !== boundTaskId || previous.port !== port ||
+      previous.listenAddress !== '127.0.0.1' || previous.endpoint !== `http://127.0.0.1:${port}/mcp` || previous.dbPath !== dbPath ||
+      previous.privateKeyFile !== expectedKey || previous.localAuthenticationEnabled !== true ||
+      !Array.isArray(previous.toolNames) || JSON.stringify([...previous.toolNames].sort()) !== JSON.stringify([...workerTools].sort())) {
+    fail('RESUME_BINDING_MISMATCH', '恢复只能沿用原角色、任务、端口、数据库和工具范围。');
+  }
+  loopPath(dbPath);
+  const key = resumeRead(expectedKey, 128);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(key)) fail('RESUME_FILE_INVALID', '原传输凭据格式无效。');
+  return { key, deploymentId: id };
+}
+
+export async function startTaskExecutor({ actor, taskId: boundTaskId, port = 18762, dbPath, leaseMs, resumeServiceFile } = {}) {
   if (!['workbuddy', 'doubao'].includes(actor)) fail('ROLE_DISABLED', 'HTTP 端只允许启动固定的受限执行角色。');
   loopId(boundTaskId);
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535 || port === 18761 || (port === 0 && !(process.env.COLLAB_TEST_MODE === '1' && PROJECT_ROOT !== SOURCE_ROOT))) fail('PORT_INVALID', '必须使用独立的新端口；随机端口仅限隔离离线测试。');
+  const resumed = resumeServiceFile === undefined ? null : resumeCredential(resumeServiceFile, { actor, boundTaskId, port, dbPath: loopPath(dbPath ?? path.join(TASK_LOOP_ROOT, 'tasks.sqlite'), { mustExist: false }) });
   const store = new TaskLoopStore({ actor, taskId: boundTaskId, ...(dbPath ? { dbPath } : {}), ...(leaseMs === undefined ? {} : { leaseMs }) });
   const deploymentId = randomUUID(), audit = auditWriter(actor, boundTaskId, deploymentId);
   const privateDirectory = loopPath(path.join(TASK_LOOP_ROOT, 'deployments', deploymentId), { mustExist: false });
   fs.mkdirSync(privateDirectory, { recursive: true });
-  const keyFile = path.join(privateDirectory, 'bearer-key.txt'), key = randomBytes(32).toString('base64url');
+  const keyFile = path.join(privateDirectory, 'bearer-key.txt'), key = resumed?.key ?? randomBytes(32).toString('base64url');
   fs.writeFileSync(loopPath(keyFile, { mustExist: false }), key, { flag: 'wx', mode: 0o600 });
   let actualPort;
   const authenticated = value => { if (typeof value !== 'string') return false; const expected = Buffer.from(`Bearer ${key}`), supplied = Buffer.from(value); return expected.length === supplied.length && timingSafeEqual(expected, supplied); };
@@ -147,20 +182,21 @@ export async function startTaskExecutor({ actor, taskId: boundTaskId, port = 187
   actualPort = server.address().port;
   const service = { version: VERSION, actor, taskId: boundTaskId, deploymentId, pid: process.pid, startedAt: stamp(), listenAddress: '127.0.0.1', port: actualPort,
     endpoint: `http://127.0.0.1:${actualPort}/mcp`, privateKeyFile: keyFile, auditFile: audit.file, dbPath: store.dbPath,
-    toolNames: [...workerTools], localAuthenticationEnabled: true, platformIdentityVerified: false, clientInfoIsSelfReported: true, conversationId: null };
+    toolNames: [...workerTools], localAuthenticationEnabled: true, platformIdentityVerified: false, clientInfoIsSelfReported: true, conversationId: null,
+    credentialResumed: resumed !== null, resumedFromDeploymentId: resumed?.deploymentId ?? null };
   const serviceFile = path.join(audit.directory, 'service.json');
   fs.writeFileSync(loopPath(serviceFile, { mustExist: false }), JSON.stringify(service, null, 2), { flag: 'wx', mode: 0o600 });
-  audit.write({ event: 'executor_started', endpoint: service.endpoint, keyLogged: false });
+  audit.write({ event: 'executor_started', endpoint: service.endpoint, keyLogged: false, credentialResumed: resumed !== null, resumedFromDeploymentId: resumed?.deploymentId ?? null });
   return { server, store, service, serviceFile, async close() { await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }); audit.write({ event: 'executor_stopped' }); store.close(); } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const { values } = parseArgs({ options: { actor: { type: 'string' }, transport: { type: 'string' }, 'task-id': { type: 'string' }, port: { type: 'string' }, db: { type: 'string' }, 'lease-ms': { type: 'string' } } });
+  const { values } = parseArgs({ options: { actor: { type: 'string' }, transport: { type: 'string' }, 'task-id': { type: 'string' }, port: { type: 'string' }, db: { type: 'string' }, 'lease-ms': { type: 'string' }, 'resume-service': { type: 'string' } } });
   const common = { ...(values.db ? { dbPath: values.db } : {}), ...(values['lease-ms'] ? { leaseMs: Number(values['lease-ms']) } : {}) };
   let running;
-  if (values.actor === 'manager' && values.transport === 'stdio' && values['task-id'] === undefined && values.port === undefined) running = await startTaskManager(common);
+  if (values.actor === 'manager' && values.transport === 'stdio' && values['task-id'] === undefined && values.port === undefined && values['resume-service'] === undefined) running = await startTaskManager(common);
   else if (['workbuddy', 'doubao'].includes(values.actor) && values.transport === 'http') {
-    running = await startTaskExecutor({ ...common, actor: values.actor, taskId: values['task-id'], ...(values.port === undefined ? {} : { port: Number(values.port) }) });
+    running = await startTaskExecutor({ ...common, actor: values.actor, taskId: values['task-id'], ...(values.port === undefined ? {} : { port: Number(values.port) }), ...(values['resume-service'] === undefined ? {} : { resumeServiceFile: values['resume-service'] }) });
     console.log(JSON.stringify({ endpoint: running.service.endpoint, pid: process.pid, deploymentId: running.service.deploymentId, serviceFile: running.serviceFile }));
   } else fail('STARTUP_SCOPE', 'manager 仅允许 stdio；执行角色仅允许 HTTP 并绑定任务，不能混用启动模式。');
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => { await running.close(); process.exit(0); });

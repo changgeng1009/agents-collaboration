@@ -11,6 +11,7 @@ export const PUBLIC_FILES = [
   'bridge/src/codex-adapter.mjs', 'bridge/src/live-codex-once.mjs', 'bridge/src/doubao-http-probe.mjs',
   'bridge/src/partner-store.mjs', 'bridge/src/partner-server.mjs',
   'bridge/src/session-capabilities.mjs', 'bridge/src/claude-code-adapter.mjs', 'bridge/src/session-store.mjs', 'bridge/src/session-tools.mjs', 'bridge/src/stdio-audit.mjs',
+  'bridge/src/session-files.mjs', 'bridge/src/session-file-server.mjs', 'bridge/src/session-dispatch.mjs', 'bridge/src/session-dispatch-worker.mjs',
   'bridge/src/codebuddy-cli-adapter.mjs', 'bridge/src/codebuddy-audit.mjs', 'bridge/src/codebuddy-probe-server.mjs',
   'bridge/src/cowork-store.mjs', 'bridge/src/cowork-server.mjs',
   'bridge/src/task-loop-store.mjs', 'bridge/src/task-loop-server.mjs',
@@ -21,7 +22,7 @@ export const PUBLIC_FILES = [
   'tests/live-codex-preflight.mjs', 'tests/extension.smoke.mjs', 'tests/partner-channel.integration.mjs',
   'tests/session-protocol-fixture.mjs', 'tests/session-fixture-server.mjs', 'tests/session-control.integration.mjs', 'tests/stdio-audit.integration.mjs',
   'tests/codebuddy-session.integration.mjs', 'tests/codebuddy-fixture-server.mjs', 'tests/codebuddy-protocol-fixture.cjs',
-  'tests/cowork-file-loop.integration.mjs', 'tests/task-loop.integration.mjs', 'scripts/check-public-files.mjs'
+  'tests/cowork-file-loop.integration.mjs', 'tests/task-loop.integration.mjs', 'tests/task-loop-restart.integration.mjs', 'tests/session-automation.integration.mjs', 'scripts/check-public-files.mjs'
 ];
 
 const root = path.resolve(fileURLToPath(new URL('../', import.meta.url)));

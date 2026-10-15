@@ -6,6 +6,7 @@ import { PROJECT_ROOT, SOURCE_ROOT, RUNTIME_ROOT, guardedPath, fail, sha256 } fr
 import { sessionCapability, allSessionCapabilities } from './session-capabilities.mjs';
 import { readSessionConfiguration, ClaudeCodeTextAdapter, sanitizeSessionValue } from './claude-code-adapter.mjs';
 import { readCodeBuddyConfiguration, CodeBuddyCliAdapter } from './codebuddy-cli-adapter.mjs';
+import { createFileScope, SessionFiles } from './session-files.mjs';
 
 export const SESSION_RUNTIME_ROOT = path.join(RUNTIME_ROOT, 'session-control');
 export const TASK_WORKSPACE_ROOT = path.join(PROJECT_ROOT, 'task-workspaces');
@@ -43,10 +44,11 @@ function nativeId(id, nullable = false) {
 }
 
 export class SessionController {
-  constructor({ actor, dbPath = path.join(SESSION_RUNTIME_ROOT, 'sessions.sqlite'), testAdapter = null, testHooks = {} }) {
+  constructor({ actor, dbPath = path.join(SESSION_RUNTIME_ROOT, 'sessions.sqlite'), testAdapter = null, testHooks = {}, dispatchBinding = null, executionObserver = null }) {
     if (!['manager', 'workbuddy', 'claude', 'codex'].includes(actor)) fail('ROLE_DISABLED', '会话控制身份必须固定于可信进程。');
     if (testAdapter && (process.env.COLLAB_TEST_MODE !== '1' || PROJECT_ROOT === SOURCE_ROOT || testAdapter.evidenceLevel !== 'local_test')) fail('TEST_ADAPTER_FORBIDDEN', '协议测试适配器只可在隔离测试根明确注入。');
     this.actor = actor; this.testAdapter = testAdapter; this.testHooks = testAdapter ? testHooks : {};
+    this.dispatchBinding = dispatchBinding; this.executionObserver = executionObserver;
     for (const directory of [SESSION_RUNTIME_ROOT, TASK_WORKSPACE_ROOT]) fs.mkdirSync(scopedPath(directory, { mustExist: false }), { recursive: true });
     this.dbPath = guardedPath(SESSION_RUNTIME_ROOT, dbPath, { mustExist: false }); scopedPath(this.dbPath, { mustExist: false });
     fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
@@ -58,12 +60,34 @@ export class SessionController {
       CREATE TABLE IF NOT EXISTS controlled_turns(turn_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_requests(request_id TEXT PRIMARY KEY, actor TEXT NOT NULL, operation TEXT NOT NULL, payload_hash TEXT NOT NULL, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_file_scopes(task_id TEXT PRIMARY KEY, value TEXT NOT NULL);
       PRAGMA user_version=1;`;
     const deadline = Date.now() + 5000;
     for (;;) { try { this.db.exec(schema); break; } catch (error) { if (![5, 6].includes(error.errcode) || Date.now() >= deadline) { this.db.close(); throw error; } Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); } }
     this.db.exec('PRAGMA busy_timeout=5000;');
   }
   close() { this.db.close(); }
+  verifyDispatchBinding(workspace, args) {
+    if (!this.dispatchBinding) return;
+    const expected = this.dispatchBinding, session = this.session(args.taskId, false);
+    if (workspace.taskId !== expected.taskId || workspace.markerSha256 !== expected.markerSha256 || JSON.stringify(workspace.identities) !== JSON.stringify(expected.identities)
+      || args.platform !== expected.platform || args.mode !== expected.mode || (session?.lastTurnId ?? null) !== expected.lastTurnId
+      || (session?.conversationId ?? null) !== expected.conversationId) fail('DISPATCH_BINDING_CHANGED', '入队后的任务目录、原生编号或轮次绑定已变化，禁止执行。');
+  }
+  fileBinding(taskId) {
+    checkTaskId(taskId);
+    const workspace = this.verifyWorkspace(this.workspace(taskId));
+    let scope = this.row('session_file_scopes', 'task_id', taskId, false);
+    if (!scope) scope = this.transaction(() => {
+      const existing = this.row('session_file_scopes', 'task_id', taskId, false);
+      if (existing) return existing;
+      const created = createFileScope(workspace);
+      this.db.prepare('INSERT INTO session_file_scopes VALUES(?,?)').run(taskId, JSON.stringify(created));
+      this.event('file_scope_prepared', { taskId, bindingId: created.bindingId }); return created;
+    });
+    new SessionFiles({ workspace, scope }); return { workspace, scope };
+  }
+  taskFiles(taskId) { if (this.actor !== 'manager') fail('ROLE_FORBIDDEN', '仅 manager 可以通过外部工具准备和读取任务文件。'); return new SessionFiles({ ...this.fileBinding(taskId), manager: true }); }
   transaction(callback) {
     scopedPath(this.dbPath);
     this.db.exec('BEGIN IMMEDIATE');
@@ -163,6 +187,7 @@ export class SessionController {
     checkTaskId(args.taskId); validPrompt(args.prompt);
     if (operation === 'send_to_conversation') nativeId(args.conversationId);
     const workspace = this.verifyWorkspace(this.workspace(args.taskId));
+    this.verifyDispatchBinding?.(workspace, args);
     const previous = this.request(operation, args).previous;
     if (previous) {
       const session = this.session(args.taskId);
@@ -173,10 +198,12 @@ export class SessionController {
     const adapter = this.adapter(args);
     const plannedTurnId = randomUUID();
     const plan = adapter.prepare(workspace.cwd, operation === 'create_conversation' ? null : args.conversationId, { turnId: plannedTurnId });
+    if (plan.fileToolsEnabled) plan.fileBinding = this.fileBinding(args.taskId);
     const claim = this.transaction(() => {
       const request = this.request(operation, args);
       if (request.previous) return { replay: this.replay(request.previous) };
       this.verifyWorkspace(workspace);
+      this.verifyDispatchBinding?.(workspace, args);
       let session = this.session(args.taskId, false);
       if (operation === 'create_conversation') {
         if (session) fail('CREATE_ALREADY_CLAIMED', '该任务已占位创建会话，未知或失败也不能换请求编号再次创建。');
@@ -213,9 +240,12 @@ export class SessionController {
       fs.writeFileSync(scopedPath(path.join(inputDirectory, 'request.json'), { mustExist: false }), JSON.stringify(sanitizeSessionValue({ ...args, promptSha256: sha256(Buffer.from(args.prompt, 'utf8')) }), null, 2), { flag: 'wx' });
       fs.writeFileSync(scopedPath(path.join(inputDirectory, 'launch-plan.json'), { mustExist: false }), JSON.stringify({ command: plan.command, args: plan.args, cwd: plan.cwd, shell: false, windowsHide: true, timeoutMs: plan.timeoutMs, envValuesLogged: false, evidenceLevel: adapter.evidenceLevel }, null, 2), { flag: 'wx' });
       this.verifyWorkspace(workspace);
-      result = await adapter.run({ plan, prompt: args.prompt, workDirectory, inputDirectory, onSpawn: pid => this.transaction(() => {
-        const current = this.turn(turn.turnId); current.status = 'running'; current.childPid = pid; current.processStarted = true; current.processStartedAt = now(); this.putTurn(current); this.event('process_started', current);
-      }) });
+      result = await adapter.run({ plan, prompt: args.prompt, workDirectory, inputDirectory,
+        onLaunchAttempt: () => { this.transaction(() => { const current = this.turn(turn.turnId); current.launchIntentRecorded = true; this.putTurn(current); this.event('platform_launch_intent', { taskId: args.taskId, turnId: turn.turnId }); }); this.executionObserver?.('wake_attempting', turn.turnId); },
+        onSpawn: pid => { this.transaction(() => {
+          const current = this.turn(turn.turnId); current.status = 'running'; current.childPid = pid; current.processStarted = true; current.processStartedAt = now(); this.putTurn(current); this.event('process_started', current);
+        }); this.executionObserver?.('running', turn.turnId); }
+      });
       this.verifyWorkspace(workspace);
     } catch (error) { result = { status: 'unknown', reason: error.code ?? 'EXECUTION_UNKNOWN', message: sanitizeSessionValue(error.message), conversationId: null, evidenceLevel: adapter.evidenceLevel, workingDirectoryVerified: false, fileAccessBoundaryVerified: false, osIsolationVerified: false }; }
     if (outputDirectory) {

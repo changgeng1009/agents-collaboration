@@ -27,7 +27,7 @@ export function taskAuditPath(file, cwd, { mustExist = true } = {}) {
 }
 
 // 专用任务审计不改变原 project/logs 审计的范围或行为。
-export function attachCodeBuddyAudit(transport, { file, cwd }) {
+export function attachCodeBuddyAudit(transport, { file, cwd, toolNames = ['get_capabilities'] }) {
   const target = taskAuditPath(file, cwd, { mustExist: false });
   const fd = fs.openSync(target, 'wx');
   const identity = fs.fstatSync(fd), pending = new Map();
@@ -46,7 +46,8 @@ export function attachCodeBuddyAudit(transport, { file, cwd }) {
       if (['initialize', 'tools/list', 'tools/call'].includes(message.method)) {
         if (message.method === 'initialize') clientInfo = { nameSha256: sha256(String(message.params?.clientInfo?.name ?? '')), versionSha256: sha256(String(message.params?.clientInfo?.version ?? '')) };
         if (pending.size >= 128) fail('AUDIT_REQUEST_LIMIT', '任务审计在途请求过多。');
-        const metadata = { method: message.method, jsonRpcId: safeId(message.id), toolName: message.method === 'tools/call' ? (message.params?.name === 'get_capabilities' ? 'get_capabilities' : 'unknown_tool') : null,
+        const metadata = { method: message.method, jsonRpcId: safeId(message.id), toolName: message.method === 'tools/call' ? (toolNames.includes(message.params?.name) ? message.params.name : 'unknown_tool') : null,
+          argumentsSha256: message.method === 'tools/call' ? sha256(JSON.stringify(message.params?.arguments ?? {})) : null,
           clientInfo, paramsSha256: sha256(JSON.stringify(message.params ?? null)) };
         pending.set(message.id, metadata); record({ direction: 'client_to_server', ...metadata, success: null });
       }
@@ -63,7 +64,7 @@ export function attachCodeBuddyAudit(transport, { file, cwd }) {
   return { close: () => fs.closeSync(fd), file: target };
 }
 
-export function readCodeBuddyAudit(file, { cwd, cliPid }) {
+export function readCodeBuddyAudit(file, { cwd, cliPid, toolNames = ['get_capabilities'] }) {
   const target = taskAuditPath(file, cwd), fd = fs.openSync(target, 'r');
   let bytes;
   try {
@@ -79,12 +80,13 @@ export function readCodeBuddyAudit(file, { cwd, cliPid }) {
   if (!records.length || records.length > 512 || records.some(item => !item || !Number.isSafeInteger(item.pid) || item.parentPid !== cliPid || !sameRealPath(item.processCwd, cwd))) fail('MCP_AUDIT_BINDING_MISMATCH', '审计来源必须为本次 CLI 的任务 MCP 子进程。');
   const serverPids = [...new Set(records.map(item => item.pid))];
   if (serverPids.length !== 1) fail('MCP_AUDIT_BINDING_MISMATCH', '任务审计出现多个服务实例，保留未知。');
-  if (records.some(item => item.method === 'tools/call' && item.toolName !== 'get_capabilities')) fail('MCP_TOOL_VIOLATION', '审计包含非授权工具。');
+  if (records.some(item => item.method === 'tools/call' && !toolNames.includes(item.toolName))) fail('MCP_TOOL_VIOLATION', '审计包含非授权工具。');
   const counts = {};
   for (const method of ['initialize', 'tools/list', 'tools/call']) {
     const calls = records.filter(item => item.direction === 'client_to_server' && item.method === method);
     if ((method !== 'tools/call' && !calls.length) || calls.some(call => !records.some(item => item.direction === 'server_to_client' && item.method === method && item.jsonRpcId === call.jsonRpcId && item.paramsSha256 === call.paramsSha256 && item.success === true && /^[a-f0-9]{64}$/.test(item.resultSha256)))) fail('MCP_AUDIT_INCOMPLETE', '握手与工具清单必须成功，每次声明的能力调用须有成功审计。');
     counts[method] = calls.length;
   }
-  return { verified: true, handshakeVerified: true, callVerified: counts['tools/call'] > 0, file: target, sha256: sha256(bytes), bytes: bytes.length, counts, serverPid: serverPids[0], cliPid, clientInfoIsSelfReported: true, bodyRecorded: false };
+  const toolCalls = records.filter(item => item.direction === 'client_to_server' && item.method === 'tools/call').map(item => ({ toolName: item.toolName, argumentsSha256: item.argumentsSha256 }));
+  return { verified: true, handshakeVerified: true, callVerified: counts['tools/call'] > 0, file: target, sha256: sha256(bytes), bytes: bytes.length, counts, toolCalls, serverPid: serverPids[0], cliPid, clientInfoIsSelfReported: true, bodyRecorded: false };
 }

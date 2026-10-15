@@ -1,6 +1,6 @@
 {
   "name": "ai-collaboration-t1-bridge",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "T1 本地任务与消息通信桥",
@@ -12,6 +12,8 @@
     "test:sessions": "\"%npm_node_execpath%\" ../tests/session-control.integration.mjs",
     "test:codebuddy": "\"%npm_node_execpath%\" ../tests/codebuddy-session.integration.mjs",
     "test:task-loop": "\"%npm_node_execpath%\" ../tests/task-loop.integration.mjs",
+    "test:task-loop-restart": "\"%npm_node_execpath%\" ../tests/task-loop-restart.integration.mjs",
+    "test:automation": "\"%npm_node_execpath%\" ../tests/session-automation.integration.mjs",
     "pack:extension": "\"%npm_node_execpath%\" scripts/package-extension.mjs",
     "adapter:prepare": "\"%npm_node_execpath%\" src/codex-adapter.mjs prepare"
   },

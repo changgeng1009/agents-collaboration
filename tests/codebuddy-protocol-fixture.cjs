@@ -18,7 +18,9 @@ const { pathToFileURL } = require('node:url');
   const denyIndex = argv.indexOf('--disallowedTools'), denyRules = [];
   if (denyIndex >= 0) for (const item of argv.slice(denyIndex+1)) { if (item.startsWith('--')) break; denyRules.push(...item.split(/[ ,]+/).filter(Boolean)); }
   const denied = new Set(denyRules.map(name=>name.toLowerCase()));
-  const declared = ['mcp__t2_candidate__get_capabilities',...nativeBuiltins.filter(name=>!denied.has(name.toLowerCase())),...(prompt.scenario==='future_builtin'?['FutureBuiltin']:[])];
+  const fileTools = path.basename(mcp.args[0]) === 'session-file-server.mjs';
+  const scopedTools = fileTools ? ['get_capabilities','read_task_file','write_task_file'] : ['get_capabilities'];
+  const declared = [...scopedTools.map(name=>`mcp__t2_candidate__${name}`),...nativeBuiltins.filter(name=>!denied.has(name.toLowerCase())),...(prompt.scenario==='future_builtin'?['FutureBuiltin']:[])];
   const runtimeChecks = nativeBuiltins.map(name=>{
     // 本地无副作用 handler 验证 deny 优先于模拟可信 allow，及交互工具 dontAsk 特例。
     let handlerCalled=false;const handler=()=>{handlerCalled=true;};
@@ -33,6 +35,7 @@ const { pathToFileURL } = require('node:url');
   const stateFile = path.join(cwd,'work','fixture-context.json');
   const previous = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile,'utf8')) : [];
   previous.push(prompt.text ?? '中文样本'); fs.writeFileSync(stateFile,JSON.stringify(previous),'utf8');
+  const fileBlocks=[];let fileText='';
   if (prompt.scenario !== 'missing_audit') {
     const bridge = path.dirname(path.dirname(mcp.args[0]));
     const { Client } = await import(pathToFileURL(path.join(bridge,'node_modules','@modelcontextprotocol','sdk','dist','esm','client','index.js')));
@@ -42,12 +45,21 @@ const { pathToFileURL } = require('node:url');
     transport.stderr.on('data',()=>{});
     await client.connect(transport);
     const list = await client.listTools();
-    if (list.tools.length !== 1 || list.tools[0].name !== 'get_capabilities') throw new Error('专用服务暴露额外工具。');
+    if (JSON.stringify(list.tools.map(tool=>tool.name).sort()) !== JSON.stringify([...scopedTools].sort())) throw new Error('专用服务暴露额外工具。');
     if (!['text_only','claimed_without_call'].includes(prompt.scenario)) {
       const result = await client.callTool({ name:'get_capabilities', arguments:{} });
       if (result.isError || result.structuredContent?.accountQueryEnabled !== false) throw new Error('能力样本调用失败。');
     }
     if (prompt.scenario === 'audit_unknown_tool') await client.callTool({ name:'send_message', arguments:{} }).catch(()=>{});
+    if(prompt.files){
+      const readArgs={area:'inputs',relativePath:'source.txt'};
+      const read=await client.callTool({name:'read_task_file',arguments:readArgs});
+      if(read.isError)throw new Error('受限文件读取失败。');fileText=read.structuredContent.text;
+      const writeArgs={area:'outputs',relativePath:`reply_${previous.length}.txt`,text:`${fileText} | ${previous.join(' / ')}`};
+      const written=await client.callTool({name:'write_task_file',arguments:writeArgs});
+      if(written.isError)throw new Error('受限文件写入失败。');
+      fileBlocks.push({type:'tool_use',id:'fixture_read',name:'mcp__t2_candidate__read_task_file',input:readArgs},{type:'tool_use',id:'fixture_write',name:'mcp__t2_candidate__write_task_file',input:writeArgs});
+    }
     await client.close();
     const auditFile = mcp.args[mcp.args.indexOf('--audit-log')+1];
     if (prompt.scenario === 'audit_bad_parent') {
@@ -84,7 +96,7 @@ const { pathToFileURL } = require('node:url');
   if (prompt.scenario==='output_limit') {process.stdout.write('x'.repeat(20000));process.exit(0);}
   if (prompt.scenario==='invalid_utf8') {process.stdout.write(Buffer.from([255,254,10]));process.exit(0);}
   if (prompt.scenario==='incomplete_json') {process.stdout.write('{"type":"result",');process.exit(0);}
-  emit({type:'assistant',session_id:id,message:{content:[{type:'text',text:previous.join(' / ')},...(prompt.scenario==='text_only'?[]:[{type:'tool_use',id:'fixture_tool_call',name:prompt.scenario==='other_tool'?'Bash':'mcp__t2_candidate__get_capabilities',input:prompt.scenario==='tool_arguments'?{path:'outside'}:{}}])]},
+  emit({type:'assistant',session_id:id,message:{content:[{type:'text',text:previous.join(' / ')},...(prompt.scenario==='text_only'?[]:[{type:'tool_use',id:'fixture_tool_call',name:prompt.scenario==='other_tool'?'Bash':'mcp__t2_candidate__get_capabilities',input:prompt.scenario==='tool_arguments'?{path:'outside'}:{}}]),...fileBlocks]},
     api_key:'sk-'+'fixture_redaction_value',userinfo:{token:'fixture_secret'},credentials:{clientSecret:'fixture_secret'},device_code:'fixture_device_secret',userCode:'fixture_device_secret',
     callback:'https://example.invalid/callback?device_code='+'fixture_device_secret'+'&ticket='+'fixture_ticket_secret'});
   process.stderr.write('token='+'fixture_secret'+' Bearer '+'fixture_bearer'+'\n');

@@ -157,7 +157,7 @@ export class TaskLoopStore {
       submittedBy: task.assignee, conversationId: null, platformIdentityVerified: false, evidenceLevel: 'local_task_submission_only' };
   }
   capabilities() {
-    return { projectId: PROJECT_ID, version: '0.1.8', channel: 'task-loop', actor: this.actor, taskId: this.taskId,
+    return { projectId: PROJECT_ID, version: '0.1.9', channel: 'task-loop', actor: this.actor, taskId: this.taskId,
       tools: this.actor === 'manager' ? ['get_capabilities', 'create_task', 'get_task_result'] : ['get_capabilities', 'claim_task', 'submit_task_result'],
       textByteLimit: LOOP_TEXT_LIMIT, leaseMs: this.leaseMs, persistence: 'separate-sqlite-wal', conversationId: null,
       platformIdentityVerified: false, clientInfoIsSelfReported: true, arbitraryFileAccess: false, shellEnabled: false, modelExecutionEnabled: false,
