@@ -18,7 +18,7 @@ const { pathToFileURL } = require('node:url');
   const denyIndex = argv.indexOf('--disallowedTools'), denyRules = [];
   if (denyIndex >= 0) for (const item of argv.slice(denyIndex+1)) { if (item.startsWith('--')) break; denyRules.push(...item.split(/[ ,]+/).filter(Boolean)); }
   const denied = new Set(denyRules.map(name=>name.toLowerCase()));
-  const fileTools = path.basename(mcp.args[0]) === 'session-file-server.mjs';
+  const fileTools = ['session-file-server.mjs','collaboration-file-server.mjs'].includes(path.basename(mcp.args[0]));
   const scopedTools = fileTools ? ['get_capabilities','read_task_file','write_task_file'] : ['get_capabilities'];
   const declared = [...scopedTools.map(name=>`mcp__t2_candidate__${name}`),...nativeBuiltins.filter(name=>!denied.has(name.toLowerCase())),...(prompt.scenario==='future_builtin'?['FutureBuiltin']:[])];
   const runtimeChecks = nativeBuiltins.map(name=>{

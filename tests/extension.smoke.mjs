@@ -9,7 +9,8 @@ import { PROJECT_ROOT, ARTIFACT_ROOT, LOG_ROOT, sha256 } from '../bridge/src/pol
 
 const packaging = JSON.parse(fs.readFileSync(path.join(LOG_ROOT, 'extension-package-manifest.json'), 'utf8'));
 const manifest = JSON.parse(fs.readFileSync(path.join(packaging.unpacked, 'manifest.json'), 'utf8'));
-const sourceVersion = JSON.parse(fs.readFileSync(path.join(CODE_ROOT, 'bridge', 'package.json'), 'utf8')).version;
+// 扩展属于保留的兼容通道，独立于新协作核心的发行版本。
+const sourceVersion = JSON.parse(fs.readFileSync(path.join(CODE_ROOT, 'bridge', 'manifest.json'), 'utf8')).version;
 assert.equal(manifest.version, sourceVersion, '历史包不能作为当前源码隔离测试对象。');
 assert.equal(manifest.server.mcp_config.env?.COLLAB_PROJECT_ROOT, '${user_config.project_root}', '包必须支持显式授权根。');
 const command = manifest.server.mcp_config.command.replace('${user_config.node_executable}', process.execPath);

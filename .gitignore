@@ -36,6 +36,14 @@
 !/bridge/src/session-file-server.mjs
 !/bridge/src/session-dispatch.mjs
 !/bridge/src/session-dispatch-worker.mjs
+!/bridge/src/collaboration-store.mjs
+!/bridge/src/collaboration-tools.mjs
+!/bridge/src/collaboration-meetings.mjs
+!/bridge/src/collaboration-execution.mjs
+!/bridge/src/collaboration-provider.mjs
+!/bridge/src/collaboration-execution-worker.mjs
+!/bridge/src/collaboration-file-server.mjs
+!/bridge/src/collaboration-service.mjs
 !/bridge/src/stdio-audit.mjs
 !/bridge/src/cowork-store.mjs
 !/bridge/src/cowork-server.mjs
@@ -63,6 +71,10 @@
 !/tests/task-loop.integration.mjs
 !/tests/task-loop-restart.integration.mjs
 !/tests/session-automation.integration.mjs
+!/tests/collaboration-core.integration.mjs
+!/tests/collaboration-mcp.integration.mjs
+!/tests/collaboration-execution.integration.mjs
+!/tests/collaboration-service.integration.mjs
 !/scripts/check-public-files.mjs
 
 # 运行数据、个人配置、方法文档和真实客户端证据留在本地。

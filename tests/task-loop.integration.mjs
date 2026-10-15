@@ -50,7 +50,7 @@ try {
   const probeFile = path.join(CODE_ROOT, 'bridge', 'src', 'doubao-http-probe.mjs'), probeHash = sha256(fs.readFileSync(probeFile));
   const manager = await managerClient('manager_first');
   const managerTools = await manager.listTools();
-  check('manager stdio 仅三个闭环工具且版本一致', () => { assert.deepEqual(managerTools.tools.map(tool => tool.name).sort(), ['create_task', 'get_capabilities', 'get_task_result']); assert.equal(manager.getServerVersion().version, JSON.parse(fs.readFileSync(path.join(CODE_ROOT, 'bridge', 'package.json'), 'utf8')).version); });
+  check('兼容 manager stdio 仅三个闭环工具且独立协议版本一致', () => { assert.deepEqual(managerTools.tools.map(tool => tool.name).sort(), ['create_task', 'get_capabilities', 'get_task_result']); assert.equal(manager.getServerVersion().version, JSON.parse(fs.readFileSync(path.join(CODE_ROOT, 'bridge', 'manifest.json'), 'utf8')).version); });
   const created = await call(manager, 'create_task', create('fixture_doubao'));
   await call(manager, 'create_task', create('fixture_workbuddy', 'workbuddy'));
   const duplicateCreate = await call(manager, 'create_task', create('fixture_doubao'));

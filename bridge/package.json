@@ -1,9 +1,9 @@
 {
-  "name": "ai-collaboration-t1-bridge",
-  "version": "0.1.9",
+  "name": "independent-agent-collaboration",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "T1 本地任务与消息通信桥",
+  "description": "独立多成员协作核心及兼容本地通信桥",
   "engines": { "node": ">=24.0.0" },
   "scripts": {
     "test": "\"%npm_node_execpath%\" ../tests/channel.integration.mjs",
@@ -14,6 +14,10 @@
     "test:task-loop": "\"%npm_node_execpath%\" ../tests/task-loop.integration.mjs",
     "test:task-loop-restart": "\"%npm_node_execpath%\" ../tests/task-loop-restart.integration.mjs",
     "test:automation": "\"%npm_node_execpath%\" ../tests/session-automation.integration.mjs",
+    "test:collaboration": "\"%npm_node_execpath%\" ../tests/collaboration-core.integration.mjs",
+    "test:collaboration-mcp": "\"%npm_node_execpath%\" ../tests/collaboration-mcp.integration.mjs",
+    "test:collaboration-execution": "\"%npm_node_execpath%\" ../tests/collaboration-execution.integration.mjs",
+    "test:collaboration-service": "\"%npm_node_execpath%\" ../tests/collaboration-service.integration.mjs",
     "pack:extension": "\"%npm_node_execpath%\" scripts/package-extension.mjs",
     "adapter:prepare": "\"%npm_node_execpath%\" src/codex-adapter.mjs prepare"
   },
