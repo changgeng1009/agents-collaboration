@@ -9,8 +9,8 @@ import { PROJECT_ROOT, SOURCE_ROOT, guardedPath, fail, sha256 } from './policy.m
 import { CollaborationStore } from './collaboration-store.mjs';
 import { createCollaborationMcp } from './collaboration-tools.mjs';
 
-export const COLLAB_SERVICE_VERSION = '0.2.0';
-const methods = new Set(['initialize', 'notifications/initialized', 'ping', 'tools/list', 'tools/call']);
+export const COLLAB_SERVICE_VERSION = '0.2.1';
+const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
 const bodyLimit = 256 * 1024;
 const stamp = () => new Date().toISOString();
 
@@ -41,12 +41,23 @@ function auditWriter(deploymentId) {
     finally { fs.closeSync(fd); }
   } };
 }
-function readBody(req) {
+function readBody(req, signal) {
   return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0, rejected = false;
-    req.on('data', bytes => { if (rejected) return; size += bytes.length; if (size > bodyLimit) { rejected = true; chunks.length = 0; reject(Object.assign(new Error('请求体超过上限。'), { code: 'BODY_TOO_LARGE' })); } else chunks.push(bytes); });
-    req.on('end', () => { if (!rejected) { try { resolve(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)))); } catch { reject(Object.assign(new Error('请求必须是有效 UTF-8 JSON。'), { code: 'INVALID_JSON' })); } } });
-    req.on('error', reject); req.setTimeout(15000, () => { req.destroy(); reject(Object.assign(new Error('读取请求超时。'), { code: 'REQUEST_TIMEOUT' })); });
+    const chunks = []; let size = 0, finished = false;
+    const finish = (error, body) => {
+      if (finished) return; finished = true; clearTimeout(timer);
+      req.off('data', data); req.off('end', end); req.off('aborted', aborted); req.off('error', failed);
+      signal.removeEventListener('abort', abort); chunks.length = 0;
+      if (error) { req.resume(); reject(error); } else resolve(body);
+    };
+    const data = bytes => { size += bytes.length; if (size > bodyLimit) finish(Object.assign(new Error('请求体超过上限。'), { code: 'BODY_TOO_LARGE' })); else chunks.push(bytes); };
+    const end = () => { try { finish(null, JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)))); } catch { finish(Object.assign(new Error('请求必须是有效 UTF-8 JSON。'), { code: 'INVALID_JSON' })); } };
+    const failed = error => finish(error), aborted = () => finish(Object.assign(new Error('客户端断开。'), { code: 'CLIENT_DISCONNECTED' }));
+    const abort = () => finish(Object.assign(new Error('请求已停止。'), { code: signal.reason?.code ?? 'CLIENT_DISCONNECTED' }));
+    // 只限制收取正文阶段，完整正文后的工具等待另受 inbox 预算控制。
+    const timer = setTimeout(() => finish(Object.assign(new Error('读取请求超时。'), { code: 'REQUEST_TIMEOUT' })), 15000);
+    req.on('data', data); req.once('end', end); req.once('error', failed); req.once('aborted', aborted);
+    signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort();
   });
 }
 function rpcMetadata(body) {
@@ -70,7 +81,16 @@ export async function startCollaborationService({ port = 18764, dbPath, reviewed
   try { admin = store.bootstrapAdmin(); audit = auditWriter(randomUUID()); }
   catch (error) { store.close(); throw error; }
   let actualPort, closing = false, auditBroken = false;
+  const requests = new Set(), activeRpc = new Map();let closePromise;
   const server = http.createServer(async (req, res) => {
+    const cancellation = new AbortController();let mcp, cleanupPromise, complete, rpcKey, connectionClosed;
+    const disconnectedResponse = new Promise(resolve => { connectionClosed = resolve; });
+    const completion = new Promise(resolve => { complete = resolve; });
+    const request = { cancellation, completion };requests.add(request);
+    const cleanup = () => cleanupPromise ??= (async () => { cancellation.abort(); if (mcp) await mcp.close(); })();
+    const disconnected = () => { if (!res.writableFinished) cancellation.abort(); connectionClosed();void cleanup().catch(() => {}); };
+    // 错误和关闭事件不能留下没有监听的 IncomingMessage error。
+    req.on('error', () => {});res.once('close', disconnected);
     // 无状态 JSON MCP 不保留空闲连接，避免重启后复用上一部署的 TCP 连接。
     res.setHeader('Connection', 'close');
     const correlationId = randomUUID();
@@ -89,22 +109,51 @@ export async function startCollaborationService({ port = 18764, dbPath, reviewed
       if (req.method !== 'POST') return reject(405, 'POST_REQUIRED');
       if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '') || (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity')) return reject(415, 'CONTENT_TYPE_REQUIRED');
       let body;
-      try { body = await readBody(req); } catch (error) { return reject(error.code === 'BODY_TOO_LARGE' ? 413 : 400, error.code === 'BODY_TOO_LARGE' ? error.code : 'INVALID_JSON'); }
+      try { body = await readBody(req, cancellation.signal); } catch (error) {
+        if (res.destroyed) return;
+        const status = error.code === 'BODY_TOO_LARGE' ? 413 : error.code === 'REQUEST_TIMEOUT' ? 408 : error.code === 'SERVICE_STOPPING' ? 503 : 400;
+        return reject(status, ['BODY_TOO_LARGE','REQUEST_TIMEOUT','SERVICE_STOPPING'].includes(error.code) ? error.code : 'INVALID_JSON');
+      }
       if (!body || Array.isArray(body) || body.jsonrpc !== '2.0' || !methods.has(body.method) || (body.id !== undefined && (typeof body.id !== 'string' && typeof body.id !== 'number' || String(body.id).length > 128))) return reject(403, 'RPC_SCOPE_FORBIDDEN');
       const current = store.resolveCredential(match[1]);
       if (!current || JSON.stringify(current) !== JSON.stringify(identity)) return reject(401, 'INSTANCE_AUTH_CHANGED');
       const actor = { kind: identity.kind, instanceId: identity.instanceId ?? null };
       const metadata = rpcMetadata(body);
       log({ event: 'rpc_received', ...actor, ...metadata });
-      const mcp = createCollaborationMcp({ store, identity, audit: entry => log({ event: 'tool_audit', ...actor, payloadSha256: sha256(JSON.stringify(entry)) }) });
+      if (body.method === 'notifications/cancelled') {
+        const params = body.params, requestId = params?.requestId;
+        if (identity.kind !== 'member') return reject(403, 'RPC_CANCEL_FORBIDDEN');
+        if (body.id !== undefined || Object.keys(body).some(key => !['jsonrpc','method','params'].includes(key)) ||
+          !params || Array.isArray(params) || Object.keys(params).some(key => !['requestId','reason'].includes(key)) ||
+          !['string','number'].includes(typeof requestId) || String(requestId).length > 128 ||
+          (params.reason !== undefined && (typeof params.reason !== 'string' || params.reason.length > 500))) return reject(403, 'RPC_SCOPE_FORBIDDEN');
+        const targets = activeRpc.get(`${identity.credentialId}:${JSON.stringify(requestId)}`);
+        if (targets?.size > 1) return reject(409, 'RPC_CANCEL_AMBIGUOUS');
+        for (const target of targets ?? []) target.abort(Object.assign(new Error('本人取消原请求。'), { code: 'CLIENT_CANCELLED' }));
+        log({ event: 'rpc_cancelled', ...actor, ...metadata, matchedOwnRequest: targets?.size === 1 });
+        res.writeHead(202);res.end();return;
+      }
+      if (body.method === 'tools/call') {
+        if (body.id === undefined) return reject(403, 'RPC_SCOPE_FORBIDDEN');
+        rpcKey = `${identity.credentialId}:${JSON.stringify(body.id)}`;
+        if (!activeRpc.has(rpcKey)) activeRpc.set(rpcKey, new Set());activeRpc.get(rpcKey).add(cancellation);
+      }
+      cancellation.signal.throwIfAborted();
+      mcp = createCollaborationMcp({ store, identity, signal: cancellation.signal, audit: entry => log({ event: 'tool_audit', ...actor, payloadSha256: sha256(JSON.stringify(entry)) }) });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       const send = transport.send.bind(transport);
       transport.send = async message => { if (message.id !== undefined) log({ event: 'rpc_response', ...actor, ...metadata, responseSha256: sha256(JSON.stringify(message.result ?? message.error ?? null)), success: !message.error && message.result?.isError !== true }); await send(message); };
-      res.once('finish', () => { try { log({ event: 'rpc_http_response', ...actor, ...metadata, status: res.statusCode }); } catch { /* 审计异常已门控后续请求，不在异步事件中继续执行。 */ } finally { void mcp.close(); } });
-      await mcp.connect(transport); await transport.handleRequest(req, res, body);
+      res.once('finish', () => { try { log({ event: 'rpc_http_response', ...actor, ...metadata, status: res.statusCode }); } catch { /* 审计异常已门控后续请求。 */ } });
+      await mcp.connect(transport);cancellation.signal.throwIfAborted();
+      // SDK 在死连接上可能保留 JSON response Promise；工具仍必须由 cleanup 排空。
+      await Promise.race([transport.handleRequest(req, res, body), disconnectedResponse]);
     } catch {
       try { log({ event: 'request_failed', code: 'SERVICE_OPERATION_FAILED' }); } catch { /* 审计异常时关闭请求，不继续操作。 */ }
       if (!res.headersSent) { res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ code: 'SERVICE_OPERATION_FAILED' })); } else res.destroy();
+    } finally {
+      await cleanup().catch(() => {});res.off('close', disconnected);
+      if (rpcKey) { const owners=activeRpc.get(rpcKey);owners?.delete(cancellation);if (!owners?.size) activeRpc.delete(rpcKey); }
+      requests.delete(request);complete();
     }
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 64;
@@ -119,7 +168,13 @@ export async function startCollaborationService({ port = 18764, dbPath, reviewed
   const serviceFile = path.join(audit.directory, 'service.json');
   fs.writeFileSync(servicePath(serviceFile, false), JSON.stringify(service, null, 2), { flag: 'wx', mode: 0o600 });
   audit.write({ event: 'service_started', endpoint: service.endpoint, platformExecutionsTriggered: 0 });
-  return { server, store, service, serviceFile, audit, async close() { closing = true; await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }); audit.write({ event: 'service_stopped' }); store.close(); } };
+  return { server, store, service, serviceFile, audit, close() { return closePromise ??= (async () => {
+    closing = true;const pending = [...requests];
+    for (const request of pending) request.cancellation.abort(Object.assign(new Error('服务停止。'), { code: 'SERVICE_STOPPING' }));
+    const stopped = new Promise(resolve => { server.close(resolve);server.closeIdleConnections(); });
+    await Promise.allSettled(pending.map(request => request.completion));await stopped;
+    audit.write({ event: 'service_stopped' });store.close();
+  })(); } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

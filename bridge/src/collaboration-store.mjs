@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { PROJECT_ROOT, SOURCE_ROOT, RUNTIME_ROOT, inside, fail, sha256 } from './policy.mjs';
 import { sessionPath, readBoundedFile, createFileScope, SessionFiles } from './session-files.mjs';
 import { parseCollaborationArgs, collaborationToolNames } from './collaboration-tools.mjs';
+import { CollaborationInbox } from './collaboration-inbox.mjs';
 
 export const COLLABORATION_RUNTIME_ROOT=path.join(RUNTIME_ROOT,'collaboration-core');
 const now=()=>new Date().toISOString(),uuid=()=>randomUUID();
@@ -30,11 +31,12 @@ export class CollaborationStore{
    CREATE TABLE IF NOT EXISTS core_wake_requests(request_id TEXT PRIMARY KEY,execution_id TEXT NOT NULL,actor TEXT NOT NULL);
    PRAGMA user_version=1;`);
   this.databaseIdentity=this.fileIdentity(this.dbPath);
+  this.inbox=new CollaborationInbox(this);
  }
  fileIdentity(file){const stat=fs.lstatSync(sessionPath(file),{bigint:true});if(!stat.isFile()||stat.nlink!==1n)fail('DATABASE_IDENTITY','协作数据文件必须是单链接普通文件。');return{dev:String(stat.dev),ino:String(stat.ino),birthtimeNs:String(stat.birthtimeNs)};}
  checkDb(){for(const suffix of['','-wal','-shm','-journal']){const file=sessionPath(this.dbPath+suffix,false);if(fs.existsSync(file)){const identity=this.fileIdentity(file);if(suffix===''&&this.databaseIdentity&&!same(identity,this.databaseIdentity))fail('DATABASE_IDENTITY','数据库路径已被替换。');}else if(suffix===''&&this.databaseIdentity)fail('DATABASE_IDENTITY','数据库路径已丢失。');}}
- close(){this.db.close();}
- tx(action){if(this.inTransaction)return action();this.checkDb();this.db.exec('BEGIN IMMEDIATE');this.inTransaction=true;try{const result=action();this.db.exec('COMMIT');return result;}catch(error){this.db.exec('ROLLBACK');throw error;}finally{this.inTransaction=false;}}
+ close(){if(this.closed)return;this.inbox.close();this.closed=true;this.db.close();}
+ tx(action){if(this.closed)fail('STORE_CLOSED','协作存储已关闭。');if(this.inTransaction)return action();this.checkDb();this.db.exec('BEGIN IMMEDIATE');this.inTransaction=true;try{const result=action();this.db.exec('COMMIT');return result;}catch(error){this.db.exec('ROLLBACK');throw error;}finally{this.inTransaction=false;}}
  get(kind,id,required=true){const row=this.db.prepare('SELECT value FROM core_records WHERE kind=? AND id=?').get(kind,id);if(!row&&required)fail('NOT_FOUND','当前授权范围没有该记录。');return row?JSON.parse(row.value):null;}
  put(kind,id,value){this.db.prepare('INSERT INTO core_records VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value').run(kind,id,JSON.stringify(value));return value;}
  list(kind){return this.db.prepare('SELECT value FROM core_records WHERE kind=? ORDER BY rowid').all(kind).map(row=>JSON.parse(row.value));}
@@ -63,7 +65,7 @@ export class CollaborationStore{
   const identity=Object.freeze({credentialId:record.id,kind:record.kind,instanceId:member.instanceId,platform:member.platform,mode:member.mode,capabilities:Object.freeze([...member.capabilities]),identityEvidence:'registered',platformVerified:false});this.#issued.add(identity);return identity;
  }
  assertIdentity(identity){if(!identity||!this.#issued.has(identity))fail('IDENTITY_UNTRUSTED','身份必须由当前服务凭据映射产生。');const credential=this.db.prepare('SELECT * FROM core_credentials WHERE id=?').get(identity.credentialId),member=this.get('member',identity.instanceId,false);if(!credential?.active||credential.instance_id!==identity.instanceId||credential.kind!==identity.kind||member?.status!=='active')fail('CREDENTIAL_REVOKED','当前凭据已吊销或身份失效。');return identity;}
- as(identity){this.assertIdentity(identity);return Object.freeze({identity,invoke:(name,args={})=>this.invoke(identity,name,args)});}
+ as(identity){this.assertIdentity(identity);return Object.freeze({identity,invoke:(name,args={},context={})=>this.invoke(identity,name,args,context)});}
  group(identity,groupId){const group=this.get('group',groupId);if(identity.kind!=='member'||group.members[identity.instanceId]?.state!=='active')fail('GROUP_FORBIDDEN','当前成员不在该组的授权范围。');return group;}
  manager(identity,groupId){const group=this.group(identity,groupId);if(group.managerId!==identity.instanceId)fail('GROUP_MANAGER_REQUIRED','仅当前组 manager 可执行此职责。');return group;}
  memberIds(group){return Object.entries(group.members).filter(([id,value])=>value.state==='active'&&this.get('member',id,false)?.status==='active').map(([id])=>id);}
@@ -92,8 +94,9 @@ export class CollaborationStore{
   }
   if(args.artifactId)this.artifact(identity,args.groupId,args.artifactId);
  }
- async invoke(identity,name,input){
+ async invoke(identity,name,input,context={}){
   const args=parseCollaborationArgs(identity.kind,name,input);this.authorize(identity,name,args);
+  if(['open_inbox','wait_for_messages','get_inbox','close_inbox'].includes(name))return this.inbox.invoke(identity,name,args,context);
   if(['open_meeting','get_meeting','submit_statement','stop_meeting','propose_conclusion','review_conclusion'].includes(name)){const{meetingOperation,expireMeetingIfNeeded}=await import('./collaboration-meetings.mjs');if(name!=='open_meeting')this.tx(()=>expireMeetingIfNeeded(this,identity,name,args));return this.perform(identity,name,args,()=>meetingOperation(this,identity,name,args));}
   if(['request_execution','wake_execution','get_execution'].includes(name)){const{executionOperation}=await import('./collaboration-execution.mjs');return executionOperation(this,identity,name,args);}
   return this.perform(identity,name,args,()=>this.handle(identity,name,args));
@@ -112,7 +115,7 @@ export class CollaborationStore{
  }
  handle(identity,name,args){
   const self=identity.instanceId;
-  if(name==='get_capabilities')return{version:'0.2.0',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),managerRole:'group_scoped_transferable',requiresCodexRuntime:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
+  if(name==='get_capabilities')return{version:'0.2.1',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
   if(name==='list_members')return{members:identity.kind==='service_admin'?this.list('member').filter(member=>member.kind==='member'):this.memberIds(this.group(identity,args.groupId)).map(id=>this.member(id))};
   if(name==='provision_member'){const result=this.provisionMember(args);this.event(identity,name,null,{instanceId:args.instanceId});return result;}
   if(name==='revoke_member'){const target=this.member(args.instanceId);this.db.prepare('UPDATE core_credentials SET active=0 WHERE instance_id=?').run(target.instanceId);target.status='revoked';this.put('member',target.instanceId,target);for(const group of this.list('group'))if(group.members[target.instanceId]?.state==='active'){group.members[target.instanceId].state='revoked';if(group.managerId===target.instanceId){group.managerId=null;this.event(identity,'manager_vacated_by_explicit_revoke',group.groupId,{previousManagerId:target.instanceId,origin:'service_admin_revocation'});}this.put('group',group.groupId,group);}this.event(identity,name,null,{instanceId:target.instanceId});return{instanceId:target.instanceId,status:'revoked'};}
