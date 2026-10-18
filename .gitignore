@@ -132,3 +132,4 @@
 !/tests/market-expert.integration.mjs
 
 !/tests/market-expert-protocol-fixture.mjs
+!/tests/market-expert-inspection.integration.mjs

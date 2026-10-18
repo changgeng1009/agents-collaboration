@@ -13,6 +13,7 @@ export const PUBLIC_FILES = [
   'tests/collaboration-media-archive.integration.mjs',
   'tests/child-process-group.mjs',
   'tests/market-expert.integration.mjs',
+  'tests/market-expert-inspection.integration.mjs',
   'tests/market-expert-protocol-fixture.mjs',
   'bridge/src/collaboration-file-boundary.mjs',
   'bridge/src/windows-task-files.mjs',
