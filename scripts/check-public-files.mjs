@@ -10,6 +10,8 @@ export const PUBLIC_FILES = [
   'bridge/src/market-expert-adapter.mjs',
   'bridge/src/market-expert-task-server.mjs',
   'tests/collaboration-media.integration.mjs',
+  'tests/collaboration-media-archive.integration.mjs',
+  'tests/child-process-group.mjs',
   'tests/market-expert.integration.mjs',
   'tests/market-expert-protocol-fixture.mjs',
   'bridge/src/collaboration-file-boundary.mjs',

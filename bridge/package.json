@@ -1,6 +1,6 @@
 {
   "name": "independent-agent-collaboration",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "description": "独立多成员协作核心及兼容本地通信桥",
@@ -22,7 +22,9 @@
     "pack:extension": "\"%npm_node_execpath%\" scripts/package-extension.mjs",
     "adapter:prepare": "\"%npm_node_execpath%\" src/codex-adapter.mjs prepare",
     "test:market-expert": "\"%npm_node_execpath%\" ../tests/market-expert.integration.mjs",
-    "test:collaboration-media": "\"%npm_node_execpath%\" ../tests/collaboration-media.integration.mjs"
+    "test:collaboration-media": "\"%npm_node_execpath%\" ../tests/collaboration-media.integration.mjs",
+    "test:collaboration-media-archive": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs",
+    "test:media-lifecycle": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs --lifecycle-only"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

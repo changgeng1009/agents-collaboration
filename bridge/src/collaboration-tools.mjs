@@ -30,6 +30,7 @@ const memberSchemas={
  record_media_generation:{...req,...task,generationId:id,status:z.enum(['submitted','running','succeeded','failed','blocked','unknown']),providerGenerationId:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/).nullable().default(null),providerGenerationFieldName:z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/).nullable().default(null),actualSkillIdentity:nativeMediaField,actualModelIdentity:nativeMediaField,sourceReceipt:mediaReceipt,summary:z.string().max(1000).default('')},
  get_media_generation:{...task,generationId:id},
  register_task_media:{...req,...task,generationId:id,relativePath:z.string().min(1).max(240),title:z.string().min(1).max(200)},
+ archive_existing_task_media:{...req,...task,sourceArtifactId:id,relativePath:z.string().min(1).max(240),title:z.string().min(1).max(200)},
  get_task_media:{...task,artifactId:id},
  read_task_media_chunk:{...task,artifactId:id,offset:z.number().int().min(0).max(256*1024*1024),length:z.number().int().min(1).max(49152).default(49152)},
  open_meeting:{...req,...group,meetingId:id,topic:z.string().min(1).max(500),participantIds:ids.min(2).max(8),maxRounds:z.number().int().min(1).max(6),maxStatements:z.number().int().min(1).max(48),deadlineAt:z.iso.datetime(),stopPolicy:z.enum(['any_participant','manager_only']),requiredApprovalCount:z.number().int().min(1).max(8).nullable().default(null),sourceIds:sources},
@@ -50,9 +51,10 @@ export function parseCollaborationArgs(kind,name,args){const shape=(kind==='serv
 const descriptions={get_capabilities:'读取固定登记身份与四层权限，不证明官方平台来源',provision_member:'服务管理员登记新成员并生成独立私有凭据文件，不返回密钥正文',create_group:'按当前身份创建组；管理员初始化明确记录admin来源',send_message:'向当前组指定成员或组广播保存消息，不代填送达、确认或回复',fetch_messages:'实际取回当前成员收件并记录送达',ack_message:'当前接收者在取回后显式确认读取',request_execution:'持久安排一次执行；排队不代表被动唤醒',wake_execution:'正式provider前检后一次执行，未知不重派',read_task_file:'按组、任务和显式文件ACL读取真实正文及哈希',write_task_file:'在任务files范围独占新建有界正文，不覆盖',submit_statement:'只提交当前成员自己的有界会议发言',review_conclusion:'只登记当前成员的独立评审，不代签其他成员意见'};
 Object.assign(descriptions,{open_inbox:'当前活跃成员开启有界收件；预算结束后停止，不自动换编号续跑。此工具不唤醒平台',wait_for_messages:'维持当前工具调用等待本组本人新收件，收到后返回正文；读取后本人调用ack_message并独立处理/回复。超时可在剩余预算内继续等，断线或终态不自动重开；响应未知先用原requestId查询，不换编号重复消费',get_inbox:'读取本成员在本组的收件预算、在途等待与终态，不代替其他成员读取',close_inbox:'停止本人收件等待并保留首个停止原因，不影响已保存消息'});
 Object.assign(descriptions,{reserve_media_generation:'持久登记一次视频生成意图，不调用技能或模型；未知与失败不换号重做',record_media_generation:'原负责人记录自己的生成观察，平台生成号与本地意图分开，不提升真实执行',register_task_media:'从当前任务outputs/files相对路径登记视频；broker核大小、SHA256、容器签名和身份，不接受调用方哈希',get_task_media:'按当前任务文件ACL读取视频元数据，不代表观看或可播放',read_task_media_chunk:'按当前任务文件ACL分块读回登记视频；接收方须完整拼接再核总SHA256，不代表观看'});
+Object.assign(descriptions,{archive_existing_task_media:'当前组manager以本人身份独立归档已存在的视频，须有任务文件读写权限并已读原负责人受控文本结果；broker核原目录、文件身份、容器和总SHA，不补记生成意图或证明平台来源'});
 export function createCollaborationMcp({store,identity,audit=()=>{},signal}){
  const lifecycle=new AbortController(),pending=new Set();
- const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.5'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
+ const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.7'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
  for(const name of collaborationToolNames(identity.kind)){
   const shape=(identity.kind==='service_admin'?adminSchemas:memberSchemas)[name];
   server.registerTool(name,{description:descriptions[name]??'按固定成员、当前组和记录ACL执行受限协作操作',inputSchema:z.object(shape).strict()},(args,extra)=>{

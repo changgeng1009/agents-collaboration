@@ -126,6 +126,8 @@
 !/bridge/src/market-expert-task-server.mjs
 
 !/tests/collaboration-media.integration.mjs
+!/tests/collaboration-media-archive.integration.mjs
+!/tests/child-process-group.mjs
 
 !/tests/market-expert.integration.mjs
 
