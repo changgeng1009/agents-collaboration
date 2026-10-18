@@ -5,6 +5,16 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/collaboration-file-boundary.mjs',
+  'bridge/src/windows-task-files.mjs',
+  'bridge/src/collaboration-routes.mjs',
+  'bridge/src/collaboration-independent-check.mjs',
+  'bridge/scripts/build-windows-file-worker.ps1',
+  'bridge/native/WindowsFileWorker/Native.cs',
+  'bridge/native/WindowsFileWorker/Program.cs',
+  'bridge/native/WindowsFileWorker/WindowsFileWorker.csproj',
+  'tests/windows-file-isolation.integration.mjs',
+  'tests/collaboration-routes.integration.mjs',
   '.gitignore', '.gitattributes', 'AGENTS.md', 'README.md',
   'bridge/package.json', 'bridge/package-lock.json', 'bridge/manifest.json',
   'bridge/src/policy.mjs', 'bridge/src/store.mjs', 'bridge/src/server.mjs',

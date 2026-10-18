@@ -9,7 +9,7 @@ import { PROJECT_ROOT, SOURCE_ROOT, guardedPath, fail, sha256 } from './policy.m
 import { CollaborationStore } from './collaboration-store.mjs';
 import { createCollaborationMcp } from './collaboration-tools.mjs';
 
-export const COLLAB_SERVICE_VERSION = '0.2.1';
+export const COLLAB_SERVICE_VERSION = '0.2.2';
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
 const bodyLimit = 256 * 1024;
 const stamp = () => new Date().toISOString();
@@ -67,7 +67,7 @@ function rpcMetadata(body) {
 }
 
 // 一个独立 HTTP 进程服务任意已登记实例；身份只由本次真实凭据解析，不取消息参数。
-export async function startCollaborationService({ port = 18764, dbPath, reviewedCodeBuddyProvider = false } = {}) {
+export async function startCollaborationService({ port = 18764, dbPath, fileWorker = null, reviewedCodeBuddyProvider = false } = {}) {
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535 || [18761, 18762, 18763].includes(port) ||
       (port === 0 && !(process.env.COLLAB_TEST_MODE === '1' && PROJECT_ROOT !== SOURCE_ROOT))) fail('SERVICE_PORT_INVALID', '独立协作服务必须使用独立端口；随机端口只允许隔离测试。');
   if (typeof reviewedCodeBuddyProvider !== 'boolean') fail('SERVICE_PROVIDER_INVALID', '执行模式只能由可信启动显式选择。');
@@ -76,7 +76,7 @@ export async function startCollaborationService({ port = 18764, dbPath, reviewed
     const { CodeBuddyCollaborationProvider } = await import('./collaboration-provider.mjs');
     executionProvider = new CodeBuddyCollaborationProvider();
   }
-  const store = new CollaborationStore({ ...(dbPath ? { dbPath } : {}), executionProvider });
+  const store = new CollaborationStore({ ...(dbPath ? { dbPath } : {}), executionProvider, fileWorker });
   let admin, audit;
   try { admin = store.bootstrapAdmin(); audit = auditWriter(randomUUID()); }
   catch (error) { store.close(); throw error; }

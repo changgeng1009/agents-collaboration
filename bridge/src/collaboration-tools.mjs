@@ -42,7 +42,7 @@ const descriptions={get_capabilities:'读取固定登记身份与四层权限，
 Object.assign(descriptions,{open_inbox:'当前活跃成员开启有界收件；预算结束后停止，不自动换编号续跑。此工具不唤醒平台',wait_for_messages:'维持当前工具调用等待本组本人新收件，收到后返回正文；读取后本人调用ack_message并独立处理/回复。超时可在剩余预算内继续等，断线或终态不自动重开；响应未知先用原requestId查询，不换编号重复消费',get_inbox:'读取本成员在本组的收件预算、在途等待与终态，不代替其他成员读取',close_inbox:'停止本人收件等待并保留首个停止原因，不影响已保存消息'});
 export function createCollaborationMcp({store,identity,audit=()=>{},signal}){
  const lifecycle=new AbortController(),pending=new Set();
- const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.1'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
+ const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.2'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
  for(const name of collaborationToolNames(identity.kind)){
   const shape=(identity.kind==='service_admin'?adminSchemas:memberSchemas)[name];
   server.registerTool(name,{description:descriptions[name]??'按固定成员、当前组和记录ACL执行受限协作操作',inputSchema:z.object(shape).strict()},(args,extra)=>{

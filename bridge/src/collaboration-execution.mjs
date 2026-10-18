@@ -1,6 +1,8 @@
+import { operateTaskFile } from './collaboration-file-boundary.mjs';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fail, sha256 } from './policy.mjs';
 import { SessionFiles } from './session-files.mjs';
+import { executionRoute } from './collaboration-routes.mjs';
 import { coreText } from './collaboration-store.mjs';
 
 export const CORE_EXECUTION_PENDING=new Set(['wake_reserved','worker_starting','worker_ready','wake_attempting','platform_running']);
@@ -18,7 +20,7 @@ export function assertExecutionLease(store,executionId,token,{workerOnly=false}=
  if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token)||!intent.leaseHash||!timingSafeEqual(Buffer.from(intent.leaseHash,'hex'),Buffer.from(sha256(token),'hex'))||!CORE_EXECUTION_PENDING.has(intent.state)||Date.now()>intent.deadline||(workerOnly&&intent.workerPid!==process.pid))fail('EXECUTION_LEASE_INVALID','一次执行租约、状态或进程绑定失效。');
  return executionContext(store,intent);
 }
-function view(store,identity,intent){const task=store.task(identity,intent.groupId,intent.taskId);const canReadReply=task.fileAcl.readers.includes(identity.instanceId);return{executionId:intent.executionId,groupId:intent.groupId,taskId:intent.taskId,targetId:intent.targetId,requestedBy:intent.requestedBy,operation:intent.operation,state:intent.state,blocker:intent.blocker??null,
+function view(store,identity,intent){const task=store.task(identity,intent.groupId,intent.taskId);const canReadReply=task.fileAcl.readers.includes(identity.instanceId);return{executionId:intent.executionId,groupId:intent.groupId,taskId:intent.taskId,targetId:intent.targetId,requestedBy:intent.requestedBy,operation:intent.operation,state:intent.state,blocker:intent.blocker??null,route:intent.route??null,
   workerStarted:intent.workerStarted===true,platformProcessStarted:intent.platformProcessStarted===true,wakeAttempt:intent.platformProcessStarted?'process_started':intent.launchIntentRecorded?'intent_recorded_outcome_unknown':'not_attempted',
   verifiedStages:{platformIdentity:false,modelStarted:false,replyObserved:intent.evidenceLevel==='real_runtime'&&intent.state==='succeeded'&&!!intent.replyText?.length,businessCompleted:false},
   agentReportedStage:task.agentReported,evidenceLevel:intent.evidenceLevel??'not_executed',nativeBindingId:intent.resultNativeBindingId??intent.nativeBindingId??null,
@@ -54,6 +56,7 @@ export async function executionOperation(store,identity,name,args){
    if(context.task.executionOwnerId&&context.task.executionOwnerId!==context.member.instanceId)fail('EXECUTION_INSTANCE_BOUND','原执行上下文属于其它实例，负责人变更不共享会话。');
    if(current.operation==='create_conversation'&&context.native)fail('NATIVE_ALREADY_BOUND','当前实例已登记原生绑定，不自动重新创建。');
    if(current.operation==='send_to_conversation'&&context.native.sourceType!=='controlled_adapter')fail('NATIVE_UNVERIFIED','成员自报的原生编号不能直接提升为受管续接权限。');
+   const route=executionRoute({platform:context.member.platform,mode:context.member.mode,operation:current.operation,localFixture:store.executionProvider?.evidenceLevel==='local_test'});current.route=route;if(route.blocker)fail(route.blocker.code,route.blocker.message);
    if(!store.executionProvider)fail('PROVIDER_NOT_CONFIGURED','未通过可信启动选择正式执行 provider；当前只支持主动读取。');
    plan=store.executionProvider.preflight(context);
   }catch(error){current.state='blocked';current.blocker={code:error.code??'PROVIDER_PREFLIGHT_FAILED',message:error.code?error.message:'正式执行前检失败。'};store.put('execution',current.executionId,current);store.event(identity,'execution_blocked',args.groupId,{executionId:current.executionId,code:current.blocker.code});return{execution:view(store,identity,current)};}
@@ -82,7 +85,7 @@ export function updateExecutionFromProvider(store,executionId,token,state,detail
 export function executionFiles(store,executionId,token){
  const context=()=>assertExecutionLease(store,executionId,token);
  return{capabilities(){const{intent}=context();return{tools:['get_capabilities','read_task_file','write_task_file'],instanceId:intent.targetId,groupId:intent.groupId,taskId:intent.taskId,scope:'current_group_task_acl',accountQueryEnabled:false,shellEnabled:false,inputsReadOnly:true,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false};},
-  read(args){const{task,intent}=context();if(!task.fileAcl.readers.includes(intent.targetId))fail('FILE_ACL_FORBIDDEN','执行实例当前没有文件读取权限。');const result=new SessionFiles({workspace:task.workspace,scope:task.scope}).read(args);context();return{...result,taskId:intent.taskId,groupId:intent.groupId};},
-  write(args){const{task,intent}=context();if(!task.fileAcl.readers.includes(intent.targetId)||!task.fileAcl.writers.includes(intent.targetId)||args.area==='inputs')fail('FILE_ACL_FORBIDDEN','执行实例当前无此区域写权限。');const result=new SessionFiles({workspace:task.workspace,scope:task.scope}).write(args);context();store.tx(()=>store.event({instanceId:'infrastructure_provider',kind:'trusted_provider'},'delegated_file_write',intent.groupId,{taskId:intent.taskId,onBehalfOf:intent.targetId,sha256:result.sha256}));return{...result,taskId:intent.taskId,groupId:intent.groupId};}
+  read(args){const{task,intent}=context();if(!task.fileAcl.readers.includes(intent.targetId))fail('FILE_ACL_FORBIDDEN','执行实例当前没有文件读取权限。');const result=operateTaskFile(store,task,'read',args);context();return{...result,taskId:intent.taskId,groupId:intent.groupId};},
+  write(args){const{task,intent}=context();if(!task.fileAcl.readers.includes(intent.targetId)||!task.fileAcl.writers.includes(intent.targetId)||args.area==='inputs')fail('FILE_ACL_FORBIDDEN','执行实例当前无此区域写权限。');const result=operateTaskFile(store,task,'write',args);context();store.tx(()=>store.event({instanceId:'infrastructure_provider',kind:'trusted_provider'},'delegated_file_write',intent.groupId,{taskId:intent.taskId,onBehalfOf:intent.targetId,sha256:result.sha256}));return{...result,taskId:intent.taskId,groupId:intent.groupId};}
  };
 }

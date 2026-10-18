@@ -14,7 +14,7 @@ const checks = [], services = [], clients = [];
 const logDir = path.join(FIXTURE_ROOT, 'logs', 'independent-service-tests'); fs.mkdirSync(logDir, { recursive: true });
 const check = (name, fn) => { fn(); checks.push({ name, passed: true }); };
 async function client(service, key) {
-  const peer = new Client({ name: 'local_fixture_not_platform_client', version: '0.2.1' }); clients.push(peer);
+  const peer = new Client({ name: 'local_fixture_not_platform_client', version: '0.2.2' }); clients.push(peer);
   await peer.connect(new StreamableHTTPClientTransport(new URL(service.endpoint), { requestInit: { headers: { Authorization: `Bearer ${key}` } } })); return peer;
 }
 function raw(endpoint, key, message, headers = {}, method = 'POST') {
@@ -30,7 +30,7 @@ try {
   const service = await startCollaborationService({ port: 0 }); services.push(service);
   const key = fs.readFileSync(service.service.adminKeyFile, 'utf8');
   const peer = await client(service.service, key);
-  check('独立 HTTP 初始化与精确版本', () => { assert.equal(peer.getServerVersion().version, '0.2.1'); assert.equal(service.server.address().address, '127.0.0.1'); assert.equal(service.service.codexModelRequired, false); assert.equal(service.service.codexApplicationClosedRuntimeVerified, false); });
+  check('独立 HTTP 初始化与精确版本', () => { assert.equal(peer.getServerVersion().version, '0.2.2'); assert.equal(service.server.address().address, '127.0.0.1'); assert.equal(service.service.codexModelRequired, false); assert.equal(service.service.codexApplicationClosedRuntimeVerified, false); });
   const tools = await peer.listTools();
   check('基础设施管理员工具已注册', () => assert.ok(tools.tools.length > 0));
   const rpc = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
@@ -72,7 +72,7 @@ try {
   await invoke(participant, 'create_task', { requestId: 'provider_task', groupId: 'provider_group', taskId: 'provider_task', title: '缺配置不得启动模型', assigneeId: 'provider_fixture', participantIds: ['provider_fixture'], fileAcl: { readers: ['provider_fixture'], writers: ['provider_fixture'], inputWriters: [] } });
   const queued = await invoke(participant, 'request_execution', { requestId: 'provider_request', groupId: 'provider_group', taskId: 'provider_task', operation: 'create_conversation', prompt: '仅离线检查默认禁用，不得调用模型。' });
   const blocked = await invoke(participant, 'wake_execution', { requestId: 'provider_wake', groupId: 'provider_group', taskId: 'provider_task', executionId: queued.execution.executionId });
-  check('可信启动选择 provider 后仍须独立配置前检，不绕过默认关闭', () => { assert.equal(selected.service.reviewedCodeBuddyProviderSelected, true); assert.equal(blocked.execution.state, 'blocked'); assert.equal(blocked.execution.blocker.code, 'ADAPTER_DISABLED'); assert.equal(blocked.execution.workerStarted, false); assert.equal(blocked.execution.platformProcessStarted, false); });
+  check('历史provider选择不能绕过已取消独立CLI正式路线', () => { assert.equal(selected.service.reviewedCodeBuddyProviderSelected, true); assert.equal(blocked.execution.state, 'blocked'); assert.equal(blocked.execution.blocker.code, 'CODEBUDDY_ROUTE_CANCELLED'); assert.equal(blocked.execution.workerStarted, false); assert.equal(blocked.execution.platformProcessStarted, false); });
   await participant.close(); await operator.close(); await selected.close(); services.splice(services.indexOf(selected), 1);
 
   const childReceipt = path.join(logDir, 'independent-child-stdout.txt'), childError = path.join(logDir, 'independent-child-stderr.txt');
@@ -87,7 +87,7 @@ try {
   let startup; const until = Date.now() + 10000;
   for (;;) { try { startup = JSON.parse(fs.readFileSync(childReceipt, 'utf8').trim()); break; } catch { if (Date.now() > until) throw new Error('独立服务启动超时。'); await new Promise(resolve => setTimeout(resolve, 50)); } }
   const detached = await client({ endpoint: startup.endpoint }, key); await detached.listTools();
-  check('启动父客户端退出后独立后台仍实际响应', () => { assert.equal(startup.pid, childPid); assert.equal(startup.version, '0.2.1'); });
+  check('启动父客户端退出后独立后台仍实际响应', () => { assert.equal(startup.pid, childPid); assert.equal(startup.version, '0.2.2'); });
   await detached.close(); process.kill(childPid); childPid = null;
   const summary = { status: 'passed', checks, source: 'isolated_service_clients_not_official_agents', officialModelsStarted: 0, officialPlatformCalls: 0,
     parentLauncherExitedVerified: true, actualCodexApplicationClosed: false, fixtureRoot: FIXTURE_ROOT, logDir };
