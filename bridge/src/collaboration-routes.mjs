@@ -6,6 +6,9 @@ export function executionRoute({platform,mode,operation,localFixture=false,autho
  const route={platform,mode,operation,mechanism:'external_api',contractStatus:'unavailable',implemented:false,runtimeVerified:false,modelStartedVerified:false,passiveWakeVerified:false,automaticModeSwitch:false,automaticRetry:false,nativeField:null,cwdContract:'unavailable',sources:[],requiredScopes:[],missingPrerequisites:[],blocker:null};
  if(platform==='claude')route.blocker=blocked('CLAUDE_PAUSED','Claude 正式接入和执行暂停。');
  else if(platform==='doubao')route.blocker=blocked('DOUBAO_CONTRACT_UNAVAILABLE','豆包正式外部创建、续接及被动唤醒合同未取得。');
+ else if(platform==='codebuddy'&&mode==='market_expert_cli'){
+  route.mechanism='reviewed_market_expert_cli_candidate';route.contractStatus='candidate_only';route.nativeField='session_id';route.cwdContract='pinned_local_task_root';route.sources=['https://www.codebuddy.cn/docs/cli/cli-reference','https://www.codebuddy.cn/docs/cli/plugins-reference'];route.missingPrerequisites=['manager_reviewed_private_configuration','independent_owner_authentication','reviewed_runtime_agent_selection_evidence','controlled_real_two_round_acceptance'];route.blocker=blocked('MARKET_EXPERT_CANDIDATE_NOT_DEPLOYED','独立市场专家启动与任务代理仅为候选；未接入core受管唤醒，不代表认证、运行时加载或真实两轮通过。');
+ }
  else if(platform!=='workbuddy')route.blocker=blocked('PLATFORM_CONTRACT_UNAVAILABLE','该平台没有本核心审查过的正式执行合同。');
  else if(mode==='codebuddy_cli'){
   route.mechanism='historical_independent_cli';route.contractStatus='historical_compatibility';

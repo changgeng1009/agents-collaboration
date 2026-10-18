@@ -43,7 +43,7 @@ export async function collectIndependentRun(config){
   for(const peer of config.peers??[]){
    const url=new URL(peer.endpoint);if(url.hostname!=='127.0.0.1'||url.protocol!=='http:')throw new Error('仅观察独立环境本机受审查协作服务。');
    const credential=fs.readFileSync(peer.credentialFile,'utf8');if(!/^[A-Za-z0-9_-]{43}$/.test(credential))throw new Error('本机凭据格式无效。');
-   const client=new Client({name:'independent_readonly_acceptance_observer',version:'0.2.2'});clients.push(client);await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:`Bearer ${credential}`}}}));
+   const client=new Client({name:'independent_readonly_acceptance_observer',version:'0.2.3'});clients.push(client);await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:`Bearer ${credential}`}}}));
    const call=async(name,args={})=>{const result=await client.callTool({name,arguments:args});if(result.isError)throw new Error('验收只读请求被拒绝。');return result.structuredContent??JSON.parse(result.content[0].text);};
    const caps=await call('get_capabilities');if(caps.identity?.platform!==peer.platform||caps.identity?.mode!==peer.mode)throw new Error('服务凭据身份不匹配指定平台模式。');
    peers.push({...peer,call,identityVerified:caps.platformIdentityVerified===true});append({event:'service_connected',platform:peer.platform,mode:peer.mode,registeredInstance:caps.identity.instanceId,platformIdentityVerified:caps.platformIdentityVerified===true});

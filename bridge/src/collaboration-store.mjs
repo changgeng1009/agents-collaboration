@@ -8,6 +8,8 @@ import { PROJECT_ROOT, SOURCE_ROOT, RUNTIME_ROOT, inside, fail, sha256 } from '.
 import { sessionPath, readBoundedFile, createFileScope, SessionFiles } from './session-files.mjs';
 import { parseCollaborationArgs, collaborationToolNames } from './collaboration-tools.mjs';
 import { CollaborationInbox } from './collaboration-inbox.mjs';
+import { CollaborationMedia, MEDIA_TOOLS } from './collaboration-media.mjs';
+import {reviewPreparedWorkspaces,verifyPreparedWorkspace,copyPreparedBrief,safeLocalDirectoryName} from './collaboration-workspaces.mjs';
 
 export const COLLABORATION_RUNTIME_ROOT=path.join(RUNTIME_ROOT,'collaboration-core');
 const now=()=>new Date().toISOString(),uuid=()=>randomUUID();
@@ -19,11 +21,13 @@ const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 
 export class CollaborationStore{
  #issued=new WeakSet();
- constructor({dbPath=path.join(COLLABORATION_RUNTIME_ROOT,'collaboration.sqlite'),executionProvider=null,fileWorker=null,allowPausedFixtures=false}={}){
+ constructor({dbPath,runtimeNamespace=null,preparedWorkspaces=[],executionProvider=null,fileWorker=null,allowPausedFixtures=false}={}){
+  if(runtimeNamespace!==null&&!safeLocalDirectoryName(runtimeNamespace))fail('RUNTIME_NAMESPACE_INVALID','独立运行命名空间必须是可信启动指定的安全标识。');
+  this.runtimeRoot=runtimeNamespace===null?COLLABORATION_RUNTIME_ROOT:path.join(COLLABORATION_RUNTIME_ROOT,runtimeNamespace);this.preparedWorkspaces=reviewPreparedWorkspaces(preparedWorkspaces);
   this.fileWorker=fileWorker;
   this.executionProvider=executionProvider;this.allowPausedFixtures=allowPausedFixtures===true&&process.env.COLLAB_TEST_MODE==='1'&&PROJECT_ROOT!==SOURCE_ROOT;
-  fs.mkdirSync(sessionPath(COLLABORATION_RUNTIME_ROOT,false),{recursive:true});
-  this.dbPath=sessionPath(dbPath,false);if(!inside(COLLABORATION_RUNTIME_ROOT,this.dbPath))fail('DATABASE_SCOPE','协作数据库只能位于独立运行根。');
+  fs.mkdirSync(sessionPath(this.runtimeRoot,false),{recursive:true});
+  this.dbPath=sessionPath(dbPath??path.join(this.runtimeRoot,'collaboration.sqlite'),false);if(!inside(this.runtimeRoot,this.dbPath))fail('DATABASE_SCOPE','协作数据库只能位于可信独立运行命名空间。');
   fs.mkdirSync(sessionPath(path.dirname(this.dbPath),false),{recursive:true});this.checkDb();
   this.db=new DatabaseSync(this.dbPath);this.db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
   this.db.exec(`CREATE TABLE IF NOT EXISTS core_records(kind TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(kind,id));
@@ -35,6 +39,7 @@ export class CollaborationStore{
    PRAGMA user_version=1;`);
   this.databaseIdentity=this.fileIdentity(this.dbPath);
   this.inbox=new CollaborationInbox(this);
+  this.media=new CollaborationMedia(this);
  }
  fileIdentity(file){const stat=fs.lstatSync(sessionPath(file),{bigint:true});if(!stat.isFile()||stat.nlink!==1n)fail('DATABASE_IDENTITY','协作数据文件必须是单链接普通文件。');return{dev:String(stat.dev),ino:String(stat.ino),birthtimeNs:String(stat.birthtimeNs)};}
  checkDb(){for(const suffix of['','-wal','-shm','-journal']){const file=sessionPath(this.dbPath+suffix,false);if(fs.existsSync(file)){const identity=this.fileIdentity(file);if(suffix===''&&this.databaseIdentity&&!same(identity,this.databaseIdentity))fail('DATABASE_IDENTITY','数据库路径已被替换。');}else if(suffix===''&&this.databaseIdentity)fail('DATABASE_IDENTITY','数据库路径已丢失。');}}
@@ -45,7 +50,7 @@ export class CollaborationStore{
  list(kind){return this.db.prepare('SELECT value FROM core_records WHERE kind=? ORDER BY rowid').all(kind).map(row=>JSON.parse(row.value));}
  event(identity,operation,groupId,value={}){this.db.prepare('INSERT INTO core_events(at,actor,actor_kind,operation,group_id,value) VALUES(?,?,?,?,?,?)').run(now(),identity.instanceId,identity.kind,operation,groupId??null,JSON.stringify(value));}
  bootstrapAdmin(){
-  const credentialFile=path.join(COLLABORATION_RUNTIME_ROOT,'admin-key.txt'),existing=this.get('member','service_admin',false);
+  const credentialFile=path.join(this.runtimeRoot,'admin-key.txt'),existing=this.get('member','service_admin',false);
   if(existing){if(!fs.existsSync(credentialFile))fail('ADMIN_CREDENTIAL_MISSING','已登记管理员的原凭据文件丢失，禁止自动重建。');const token=readBoundedFile(credentialFile,128).bytes.toString('utf8'),identity=this.resolveCredential(token);if(!identity||identity.kind!=='service_admin')fail('ADMIN_CREDENTIAL_CHANGED','管理员原凭据与数据库不一致。');return{credentialFile};}
   if(fs.existsSync(credentialFile))fail('ADMIN_CREDENTIAL_ORPHANED','存在未登记管理员凭据，保留核查，不接管。');
   return this.provisionMember({instanceId:'service_admin',platform:'infrastructure',mode:'local',kind:'service_admin',capabilities:[]});
@@ -58,7 +63,7 @@ export class CollaborationStore{
   if(!Array.isArray(capabilities)||capabilities.length>32||capabilities.some(value=>typeof value!=='string'||value.length>64))fail('MEMBER_INVALID','能力登记必须有界，不授予额外权限。');
   const raw=credential??randomBytes(32).toString('base64url');if(!/^[A-Za-z0-9_-]{43}$/.test(raw))fail('CREDENTIAL_INVALID','本地身份必须为独立生成的有界凭据。');
   return this.tx(()=>{if(this.get('member',instanceId,false))fail('MEMBER_EXISTS','实例已登记，禁止静默替换身份。');const credentialId=uuid();
-   const credentialFile=kind==='service_admin'?path.join(COLLABORATION_RUNTIME_ROOT,'admin-key.txt'):path.join(COLLABORATION_RUNTIME_ROOT,'credentials',`${credentialId}.key`);
+   const credentialFile=kind==='service_admin'?path.join(this.runtimeRoot,'admin-key.txt'):path.join(this.runtimeRoot,'credentials',`${credentialId}.key`);
    fs.mkdirSync(sessionPath(path.dirname(credentialFile),false),{recursive:true});fs.writeFileSync(sessionPath(credentialFile,false),raw,{flag:'wx',mode:0o600});
    const member={instanceId,kind,platform,mode,capabilities:unique(capabilities),status:'active',createdAt:now(),identityEvidence:'registered',platformVerified:false};
    this.put('member',instanceId,member);this.db.prepare('INSERT INTO core_credentials VALUES(?,?,?,?,1)').run(credentialId,sha256(raw),instanceId,kind);
@@ -75,7 +80,7 @@ export class CollaborationStore{
  member(id){const member=this.get('member',id);if(member.kind!=='member'||member.status!=='active')fail('MEMBER_UNAVAILABLE','目标成员当前不可加入协作。');return member;}
  task(identity,groupId,taskId,{metadata=false}={}){const group=this.group(identity,groupId),task=this.get('task',`${groupId}:${taskId}`);if(task.groupId!==groupId||(!task.participantIds.includes(identity.instanceId)&&!(metadata&&group.managerId===identity.instanceId)))fail('TASK_FORBIDDEN','当前成员没有该任务权限。');return task;}
  message(identity,groupId,id){this.group(identity,groupId);const message=this.get('message',id);if(message.groupId!==groupId||![message.senderId,...message.recipientIds].includes(identity.instanceId))fail('MESSAGE_FORBIDDEN','消息属于其它组或私密收件范围。');return message;}
- artifactReaders(artifact){if(artifact.aclMode!=='task_readers')return artifact.readerIds;const task=this.get('task',`${artifact.groupId}:${artifact.taskId}`);return unique([artifact.authorId,...task.fileAcl.readers]).filter(id=>task.participantIds.includes(id));}
+ artifactReaders(artifact){if(artifact.aclMode!=='task_readers')return artifact.readerIds;const task=this.get('task',`${artifact.groupId}:${artifact.taskId}`);return unique([...(artifact.kind==='binary_media'?[]:[artifact.authorId]),...task.fileAcl.readers]).filter(id=>task.participantIds.includes(id));}
  artifact(identity,groupId,id){this.group(identity,groupId);const artifact=this.get('artifact',id);if(artifact.groupId!==groupId||!this.artifactReaders(artifact).includes(identity.instanceId))fail('ARTIFACT_FORBIDDEN','当前成员无权读取该共享成果。');if(artifact.taskId)this.task(identity,groupId,artifact.taskId);return{...artifact,effectiveReaderIds:this.artifactReaders(artifact)};}
  markRead(identity,kind,recordId,groupId){this.db.prepare('INSERT INTO core_reads VALUES(?,?,?,?,?) ON CONFLICT(actor,kind,record_id) DO UPDATE SET at=excluded.at').run(identity.instanceId,kind,recordId,groupId,now());}
  checkSources(identity,groupId,refs,audience){for(const ref of refs){const record=this.get(ref.kind,ref.id);if(record.groupId!==groupId)fail('SOURCE_GROUP_FORBIDDEN','引用不能跨工作组。');const readers=ref.kind==='message'?[record.senderId,...record.recipientIds]:ref.kind==='artifact'?this.artifactReaders(record):record.readerIds??record.participantIds;
@@ -94,11 +99,13 @@ export class CollaborationStore{
    if(['start_task','submit_task_result'].includes(name)&&task.assigneeId!==identity.instanceId)fail('TASK_ASSIGNEE_REQUIRED','仅当前负责人可提交自己的处理记录。');
    if(name==='read_task_file'&&!task.fileAcl.readers.includes(identity.instanceId))fail('FILE_ACL_FORBIDDEN','任务参与身份不等于文件读取授权。');
    if(name==='write_task_file'&&(!task.fileAcl.writers.includes(identity.instanceId)||(args.area==='inputs'&&!task.fileAcl.inputWriters.includes(identity.instanceId))))fail('FILE_ACL_FORBIDDEN','当前成员没有该区域的明确写权限。');
+   if(MEDIA_TOOLS.includes(name)&&(!task.fileAcl.readers.includes(identity.instanceId)||(['reserve_media_generation','record_media_generation','register_task_media'].includes(name)&&!task.fileAcl.writers.includes(identity.instanceId))))fail('FILE_ACL_FORBIDDEN','视频操作及历史请求读回须满足当前任务文件ACL。');
   }
   if(args.artifactId)this.artifact(identity,args.groupId,args.artifactId);
  }
  async invoke(identity,name,input,context={}){
   const args=parseCollaborationArgs(identity.kind,name,input);this.authorize(identity,name,args);
+  if(MEDIA_TOOLS.includes(name))return this.media.invoke(identity,name,args);
   if(['open_inbox','wait_for_messages','get_inbox','close_inbox'].includes(name))return this.inbox.invoke(identity,name,args,context);
   if(['open_meeting','get_meeting','submit_statement','stop_meeting','propose_conclusion','review_conclusion'].includes(name)){const{meetingOperation,expireMeetingIfNeeded}=await import('./collaboration-meetings.mjs');if(name!=='open_meeting')this.tx(()=>expireMeetingIfNeeded(this,identity,name,args));return this.perform(identity,name,args,()=>meetingOperation(this,identity,name,args));}
   if(['request_execution','wake_execution','get_execution'].includes(name)){const{executionOperation}=await import('./collaboration-execution.mjs');return executionOperation(this,identity,name,args);}
@@ -118,7 +125,7 @@ export class CollaborationStore{
  }
  handle(identity,name,args){
   const self=identity.instanceId;
-  if(name==='get_capabilities')return{version:'0.2.2',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),executionRoutes:platformRoutes(identity.platform,identity.mode),fileWorkerBoundary:{implemented:true,configured:this.fileWorker!==null,verification:'per_operation_only',unconfiguredMode:'bridge_only',configuredFailureFallback:false,platformOsIsolationVerified:false},managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
+  if(name==='get_capabilities')return{version:'0.2.3',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),executionRoutes:platformRoutes(identity.platform,identity.mode),fileWorkerBoundary:{implemented:true,configured:this.fileWorker!==null,verification:'per_operation_only',unconfiguredMode:'bridge_only',configuredFailureFallback:false,platformOsIsolationVerified:false},managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
   if(name==='list_members')return{members:identity.kind==='service_admin'?this.list('member').filter(member=>member.kind==='member'):this.memberIds(this.group(identity,args.groupId)).map(id=>this.member(id))};
   if(name==='provision_member'){const result=this.provisionMember(args);this.event(identity,name,null,{instanceId:args.instanceId});return result;}
   if(name==='revoke_member'){const target=this.member(args.instanceId);this.db.prepare('UPDATE core_credentials SET active=0 WHERE instance_id=?').run(target.instanceId);target.status='revoked';this.put('member',target.instanceId,target);for(const group of this.list('group'))if(group.members[target.instanceId]?.state==='active'){group.members[target.instanceId].state='revoked';if(group.managerId===target.instanceId){group.managerId=null;this.event(identity,'manager_vacated_by_explicit_revoke',group.groupId,{previousManagerId:target.instanceId,origin:'service_admin_revocation'});}this.put('group',group.groupId,group);}this.event(identity,name,null,{instanceId:target.instanceId});return{instanceId:target.instanceId,status:'revoked'};}
@@ -175,10 +182,11 @@ export class CollaborationStore{
  }
  validateTaskAcl(group,participants,acl,assignee){if(!participants.includes(assignee)||participants.some(id=>!this.memberIds(group).includes(id)))fail('TASK_PARTICIPANTS_INVALID','任务负责人和参与者必须在当前组。');for(const key of['readers','writers','inputWriters'])if(acl[key].some(id=>!participants.includes(id)))fail('FILE_ACL_INVALID','文件授权必须显式限定为任务参与者。');if(acl.writers.some(id=>!acl.readers.includes(id))||acl.inputWriters.some(id=>!acl.writers.includes(id)))fail('FILE_ACL_INVALID','写权限须有读取权限，输入写须有普通写权限。');}
  createTask(identity,args){const group=this.manager(identity,args.groupId),key=`${args.groupId}:${args.taskId}`;if(this.get('task',key,false))fail('TASK_EXISTS','任务已登记，不能接管或替换。');const participants=unique(args.participantIds);this.validateTaskAcl(group,participants,args.fileAcl,args.assigneeId);this.checkSources(identity,args.groupId,args.sourceIds,participants);
-  const task={groupId:args.groupId,taskId:args.taskId,title:args.title,assigneeId:args.assigneeId,participantIds:participants,fileAcl:args.fileAcl,sourceIds:args.sourceIds,createdBy:identity.instanceId,createdAt:now(),assignmentRevision:1,status:'workspace_unknown',workspaceId:`core_${uuid().replaceAll('-','')}`,results:[],agentReported:null};this.put('task',key,task);this.event(identity,'task_reserved',args.groupId,{taskId:task.taskId});
-  return{task:this.taskSummary(task),afterCommit:async()=>{try{const root=path.join(PROJECT_ROOT,'task-workspaces',task.workspaceId);fs.mkdirSync(sessionPath(path.dirname(root),false),{recursive:true});fs.mkdirSync(sessionPath(root,false));const paths={taskRoot:root,inputs:path.join(root,'inputs'),work:path.join(root,'work'),outputs:path.join(root,'outputs')};for(const area of['inputs','work','outputs'])fs.mkdirSync(sessionPath(paths[area],false));const marker=Buffer.from(JSON.stringify({taskId:task.workspaceId,owner:'collaboration-core',groupId:task.groupId,logicalTaskId:task.taskId,bindingId:uuid()}),'utf8');fs.writeFileSync(path.join(root,'.task-binding.json'),marker,{flag:'wx',mode:0o600});
-    const workspace={taskId:task.workspaceId,owner:'collaboration-core',...paths,cwd:root,identities:Object.fromEntries(Object.entries(paths).map(([name,directory])=>[name,directoryIdentity(directory)])),markerSha256:sha256(marker)};const scope=createFileScope(workspace);
-    return this.tx(()=>{this.authorize(identity,'create_task',args);const current=this.get('task',key);current.workspace=workspace;current.scope=scope;current.status='assigned';this.put('task',key,current);this.event(identity,'task_workspace_ready',args.groupId,{taskId:task.taskId});return{task:this.taskSummary(current)};});
+  const prepared=this.preparedWorkspaces.get(key)??null;
+  const task={groupId:args.groupId,taskId:args.taskId,title:args.title,assigneeId:args.assigneeId,participantIds:participants,fileAcl:args.fileAcl,sourceIds:args.sourceIds,createdBy:identity.instanceId,createdAt:now(),assignmentRevision:1,status:'workspace_unknown',workspaceId:prepared?path.basename(prepared.root):`core_${uuid().replaceAll('-','')}`,results:[],agentReported:null};this.put('task',key,task);this.event(identity,'task_reserved',args.groupId,{taskId:task.taskId});
+  return{task:this.taskSummary(task),afterCommit:async()=>{try{const root=path.join(PROJECT_ROOT,'task-workspaces',task.workspaceId);if(prepared)verifyPreparedWorkspace(prepared,{requireUnbound:true});else{fs.mkdirSync(sessionPath(path.dirname(root),false),{recursive:true});fs.mkdirSync(sessionPath(root,false));}const paths={taskRoot:root,inputs:path.join(root,'inputs'),work:path.join(root,'work'),outputs:path.join(root,'outputs')};for(const area of['inputs','work','outputs']){if(prepared&&fs.existsSync(paths[area]))directoryIdentity(paths[area]);else fs.mkdirSync(sessionPath(paths[area],false));}const marker=Buffer.from(JSON.stringify({taskId:task.workspaceId,owner:'collaboration-core',groupId:task.groupId,logicalTaskId:task.taskId,bindingId:uuid()}),'utf8');fs.writeFileSync(path.join(root,'.task-binding.json'),marker,{flag:'wx',mode:0o600});
+    const workspace={taskId:task.workspaceId,owner:'collaboration-core',...paths,cwd:root,identities:Object.fromEntries(Object.entries(paths).map(([name,directory])=>[name,directoryIdentity(directory)])),markerSha256:sha256(marker)};const scope=createFileScope(workspace);const preparedInput=prepared?copyPreparedBrief(prepared,path.join(paths.inputs,'files','manager-brief.json')):null;
+    return this.tx(()=>{this.authorize(identity,'create_task',args);const current=this.get('task',key);current.workspace=workspace;current.scope=scope;current.preparedInput=preparedInput;current.status='assigned';this.put('task',key,current);this.event(identity,'task_workspace_ready',args.groupId,{taskId:task.taskId});return{task:this.taskSummary(current)};});
    }catch(error){this.tx(()=>{const current=this.get('task',key);current.status='workspace_unknown';this.put('task',key,current);});fail('WORKSPACE_CREATION_UNKNOWN','任务目录创建未完成，原占位与文件保留，不自动重做。');}}};
  }
  publishArtifact(identity,args,taskResult=false){const self=identity.instanceId,task=args.taskId?this.task(identity,args.groupId,args.taskId):null;coreText(args.text);const readers=taskResult?unique([self,...task.fileAcl.readers]):unique(args.readerIds);if(!readers.includes(self)||readers.some(id=>!this.memberIds(this.group(identity,args.groupId)).includes(id))||(task&&readers.some(id=>!task.participantIds.includes(id))))fail('ARTIFACT_READERS_INVALID','成果读者须明确且不超出任务/组范围。');this.checkSources(identity,args.groupId,args.sourceIds,readers);

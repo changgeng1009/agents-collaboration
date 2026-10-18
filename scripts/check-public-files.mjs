@@ -5,6 +5,13 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/collaboration-media.mjs',
+  'bridge/src/collaboration-workspaces.mjs',
+  'bridge/src/market-expert-adapter.mjs',
+  'bridge/src/market-expert-task-server.mjs',
+  'tests/collaboration-media.integration.mjs',
+  'tests/market-expert.integration.mjs',
+  'tests/market-expert-protocol-fixture.mjs',
   'bridge/src/collaboration-file-boundary.mjs',
   'bridge/src/windows-task-files.mjs',
   'bridge/src/collaboration-routes.mjs',

@@ -116,3 +116,17 @@
 !/tests/windows-file-isolation.integration.mjs
 !/tests/collaboration-routes.integration.mjs
 !/bridge/src/collaboration-file-boundary.mjs
+
+!/bridge/src/collaboration-media.mjs
+
+!/bridge/src/collaboration-workspaces.mjs
+
+!/bridge/src/market-expert-adapter.mjs
+
+!/bridge/src/market-expert-task-server.mjs
+
+!/tests/collaboration-media.integration.mjs
+
+!/tests/market-expert.integration.mjs
+
+!/tests/market-expert-protocol-fixture.mjs
