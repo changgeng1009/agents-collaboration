@@ -1,6 +1,6 @@
 {
   "name": "independent-agent-collaboration",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "description": "独立多成员协作核心及兼容本地通信桥",

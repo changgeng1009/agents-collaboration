@@ -52,7 +52,7 @@ Object.assign(descriptions,{open_inbox:'当前活跃成员开启有界收件；�
 Object.assign(descriptions,{reserve_media_generation:'持久登记一次视频生成意图，不调用技能或模型；未知与失败不换号重做',record_media_generation:'原负责人记录自己的生成观察，平台生成号与本地意图分开，不提升真实执行',register_task_media:'从当前任务outputs/files相对路径登记视频；broker核大小、SHA256、容器签名和身份，不接受调用方哈希',get_task_media:'按当前任务文件ACL读取视频元数据，不代表观看或可播放',read_task_media_chunk:'按当前任务文件ACL分块读回登记视频；接收方须完整拼接再核总SHA256，不代表观看'});
 export function createCollaborationMcp({store,identity,audit=()=>{},signal}){
  const lifecycle=new AbortController(),pending=new Set();
- const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.3'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
+ const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.4'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
  for(const name of collaborationToolNames(identity.kind)){
   const shape=(identity.kind==='service_admin'?adminSchemas:memberSchemas)[name];
   server.registerTool(name,{description:descriptions[name]??'按固定成员、当前组和记录ACL执行受限协作操作',inputSchema:z.object(shape).strict()},(args,extra)=>{

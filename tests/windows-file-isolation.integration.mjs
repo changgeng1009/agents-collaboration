@@ -22,7 +22,7 @@ else{
  const logDir=path.join(codeRoot,'logs/executor/T10-INDEPENDENT-EXECUTION-20261018',`mcp-os-${randomUUID()}`);fs.mkdirSync(logDir,{recursive:true});
  const checks=[],clients=[];let service;
  const check=async(name,fn)=>{await fn();checks.push({name,passed:true});};let counter=0;
- async function connect(key){const client=new Client({name:'isolated_mcp_file_worker_fixture',version:'0.2.3'});clients.push(client);await client.connect(new StreamableHTTPClientTransport(new URL(service.service.endpoint),{requestInit:{headers:{Authorization:`Bearer ${key}`}}}));return client;}
+ async function connect(key){const client=new Client({name:'isolated_mcp_file_worker_fixture',version:'0.2.4'});clients.push(client);await client.connect(new StreamableHTTPClientTransport(new URL(service.service.endpoint),{requestInit:{headers:{Authorization:`Bearer ${key}`}}}));return client;}
  async function call(peer,name,args={}){const result=await peer.callTool({name,arguments:{...(!name.startsWith('get_')&&!name.startsWith('read_')?{requestId:`fixture_${++counter}`} : {}),...args}});const output=result.structuredContent??JSON.parse(result.content[0].text);if(result.isError)throw Object.assign(new Error(output.message),{code:output.code});return output;}
  const rejected=(fn,code)=>assert.rejects(fn,error=>{assert.equal(error.code,code);return true;});
  try{
