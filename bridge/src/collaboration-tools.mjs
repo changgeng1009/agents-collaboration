@@ -54,7 +54,7 @@ Object.assign(descriptions,{reserve_media_generation:'持久登记一次视频�
 Object.assign(descriptions,{archive_existing_task_media:'当前组manager以本人身份独立归档已存在的视频，须有任务文件读写权限并已读原负责人受控文本结果；broker核原目录、文件身份、容器和总SHA，不补记生成意图或证明平台来源'});
 export function createCollaborationMcp({store,identity,audit=()=>{},signal}){
  const lifecycle=new AbortController(),pending=new Set();
- const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.10'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
+ const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.11'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
  for(const name of collaborationToolNames(identity.kind)){
   const shape=(identity.kind==='service_admin'?adminSchemas:memberSchemas)[name];
   server.registerTool(name,{description:descriptions[name]??'按固定成员、当前组和记录ACL执行受限协作操作',inputSchema:z.object(shape).strict()},(args,extra)=>{

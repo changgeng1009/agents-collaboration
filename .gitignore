@@ -139,3 +139,5 @@
 !/bridge/src/market-pretool-policy.mjs
 !/bridge/src/market-review-frame-broker.mjs
 !/tests/market-review-policy.integration.mjs
+!/bridge/src/market-plugin-inspection.mjs
+!/tests/market-plugin-loading.integration.mjs
