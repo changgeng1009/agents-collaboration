@@ -1,0 +1,28 @@
+import {FIXTURE_ROOT} from './test-context.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {validateQualityRecord,assessContentQuality,validateTargetDuration} from '../bridge/src/content-quality.mjs';
+
+const checks=[],context={versionId:'sample_version',durationMs:1000,voiceoverRequired:true,subtitlesRequired:true};
+const range={startMs:0,endMs:1000};
+const evidenceRef={area:'work',relativePath:'inspection.txt'};
+assert.throws(()=>validateQualityRecord({versionId:context.versionId,checks:[{dimension:'continuous_motion',status:'passed',method:'frame_view',range,evidenceRef,note:'静帧不能证明连续动作'}]},context),error=>error.code==='QUALITY_METHOD_INSUFFICIENT');
+checks.push({name:'静态抽帧不能将连续动作记为通过',passed:true});
+const fullContext={...context,durationMs:30000,voiceoverRequired:false,subtitlesRequired:false};
+const frameCheck={dimension:'picture',status:'passed',method:'frame_view',range:{startMs:0,endMs:30000},evidenceRef:{area:'work',relativePath:'frame-001.png'},note:'单帧不是整片观看'};
+assert.throws(()=>validateQualityRecord({versionId:context.versionId,checks:[frameCheck]},fullContext),error=>error.code==='QUALITY_FRAME_RANGE_INVALID');
+const sample=validateQualityRecord({versionId:context.versionId,checks:[{...frameCheck,range:{startMs:458,endMs:459}}]},fullContext);
+assert.ok(assessContentQuality([sample],fullContext).coverageGaps.includes('picture'));
+checks.push({name:'单帧只表示采样点，不能凭宽区间或采样摘要计整片画面覆盖',passed:true});
+const subtitleCheck={dimension:'subtitle_timing',status:'passed',method:'subtitle_inspection',range,evidenceRef,note:'字幕文本检查不等于源时间或成片同步检查'};
+assert.throws(()=>validateQualityRecord({versionId:context.versionId,checks:[subtitleCheck]},context),error=>error.code==='QUALITY_METHOD_INSUFFICIENT');
+const sourceTiming=validateQualityRecord({versionId:context.versionId,checks:[{...subtitleCheck,method:'subtitle_source_timing'}]},context);
+const subtitleCoverage=assessContentQuality([sourceTiming],context);
+assert.ok(subtitleCoverage.coverageGaps.includes('subtitle_rendering'));
+assert.ok(subtitleCoverage.coverageGaps.includes('voiceover_sync'));
+checks.push({name:'字幕源时间、成片渲染和配音同步分别覆盖，不能由SRT凑全通过',passed:true});
+assert.equal(validateTargetDuration(1000,1000),true);assert.throws(()=>validateTargetDuration(1000,30000),{code:'QUALITY_TARGET_DURATION_MISMATCH'});checks.push({name:'主成片实际时长须匹配原brief目标，不按短片时长缩小整片验收',passed:true});
+const directory=path.join(FIXTURE_ROOT,'logs/quality-tests');fs.mkdirSync(directory,{recursive:true});
+fs.writeFileSync(path.join(directory,'summary.json'),JSON.stringify({status:'passed',checks,officialPlatformCalls:0,modelCalls:0},null,2));
+console.log(JSON.stringify({status:'passed',checks:checks.length,fixtureRoot:FIXTURE_ROOT}));

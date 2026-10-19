@@ -1,0 +1,12 @@
+import {FIXTURE_ROOT} from './test-context.mjs';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {buildWorkBuddyRequest,parseAcpPromptStream,nativeReference,platformContinuation} from '../bridge/src/platform-content-contracts.mjs';
+assert.deepEqual(buildWorkBuddyRequest({mode:'localassistant',operation:'send',content:'合成测试',msgType:'text'}).body,{content:'合成测试',msg_type:'text'});
+assert.equal(nativeReference({platform:'workbuddy',mode:'localassistant',fieldName:'message_id',value:'message_only'}).kind,'message');
+assert.equal(nativeReference({platform:'workbuddy',mode:'cloud',fieldName:'task_id',value:'native_cloud_task'}).kind,'session');
+assert.throws(()=>buildWorkBuddyRequest({mode:'desktop',operation:'send',content:'不能静默改云端'}),{code:'PLATFORM_CONTRACT_UNAVAILABLE'});
+const stream='event: message\ndata: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session_native","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"片段"}}}}\n\ndata: {"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}\n\n';
+assert.equal(parseAcpPromptStream(stream,{requestId:7,sessionId:'session_native',httpCompleted:true}).status,'succeeded');
+assert.equal(parseAcpPromptStream(stream.split('data: {"jsonrpc":"2.0","id":7')[0],{requestId:7,sessionId:'session_native',httpCompleted:true}).status,'unknown');
+assert.equal(parseAcpPromptStream(stream.replace('session_native','other'),{requestId:7,sessionId:'session_native',httpCompleted:true}).status,'unknown');
+assert.equal(parseAcpPromptStream(stream,{requestId:7,sessionId:'session_native',httpCompleted:false}).status,'unknown');
+assert.equal(platformContinuation({platform:'doubao',mode:'desktop'}).externalWakeSupported,false);assert.equal(platformContinuation({platform:'workbuddy',mode:'localassistant'}).arbitraryDesktopSessionSelectionSupported,false);
+const dir=path.join(FIXTURE_ROOT,'logs/platform-contract-tests');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'summary.json'),JSON.stringify({checks:4,officialPlatformCalls:0,modelCalls:0}));console.log(JSON.stringify({status:'passed',checks:4,fixtureRoot:FIXTURE_ROOT}));

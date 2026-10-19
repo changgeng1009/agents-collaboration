@@ -8,7 +8,16 @@ const policy=z.object({allowMemberTakeover:z.boolean()}).strict();
 const fileAcl=z.object({readers:ids,writers:ids,inputWriters:ids}).strict();
 const mediaReceipt=z.object({area:z.enum(['inputs','work','outputs']),relativePath:z.string().min(1).max(240)}).strict().nullable().default(null);
 const nativeMediaField=z.object({fieldName:z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),value:z.string().min(1).max(256)}).strict().nullable().default(null);
+const contentRoles=z.object(Object.fromEntries(['script','generation','collection','edit','subtitles','voiceover','review','revision','rereview'].map(stage=>[stage,id]))).strict();
+const contentBrief=z.object({area:z.literal('inputs'),relativePath:z.string().min(1).max(240)}).strict();
+const contentStageTasks=z.object(Object.fromEntries(['script','generation','collection','edit','subtitles','voiceover','review','revision','rereview'].map(stage=>[stage,z.object({taskId:id,briefRef:contentBrief}).strict()]))).strict();
+const qualityCheck=z.object({dimension:z.enum(['picture','continuous_motion','subtitle_text','subtitle_timing','subtitle_rendering','voiceover_sync','audio_presence','audio_decode','audio_loudness','audio_listening']),status:z.enum(['checked','passed','failed','not_inspected']),method:z.enum(['frame_view','video_playback','subtitle_inspection','subtitle_source_timing','subtitle_video_review','audiovisual_review','ffprobe','ffmpeg_decode','loudness_measurement','audio_listening','not_inspected']),range:z.object({startMs:z.number().int().min(0),endMs:z.number().int().min(1)}).strict(),evidenceRef:mediaReceipt,note:z.string().max(4096)}).strict();
 const memberSchemas={
+ create_content_workflow:{...req,...task,briefRef:contentBrief,roles:contentRoles,stageTasks:contentStageTasks,requirements:z.object({durationMs:z.number().int().min(1).max(600000),voiceoverRequired:z.boolean(),subtitlesRequired:z.boolean()}).strict()},
+ get_content_workflow:task,
+ record_content_quality:{...req,...task,expectedRevision:z.number().int().min(1),versionId:id,checks:z.array(qualityCheck).min(1).max(64)},
+ request_content_rework:{...req,...task,expectedRevision:z.number().int().min(1),qualityId:id,issueIndexes:z.array(z.number().int().min(0).max(63)).min(1).max(64)},
+ record_content_stage:{...req,...task,expectedRevision:z.number().int().min(1),stage:z.enum(['script','generation','collection','edit','subtitles','voiceover','review','revision','rereview']),stageId:id.nullable().default(null),status:z.enum(['reserved','submitted','running','succeeded','failed','blocked','unknown']),inputVersionIds:ids.default([]),outputArtifactIds:ids.default([]),outputFiles:z.array(z.object({relativePath:z.string().min(1).max(240)}).strict()).max(8).default([]),sourceReceiptRef:mediaReceipt,nativeReferences:z.array(z.object({kind:z.enum(['model','platform_message','task','generation','session','artifact']),platform:id,mode:id,fieldName:z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),value:z.string().min(1).max(256)}).strict()).max(16).default([])},
  get_capabilities:{},list_members:group,list_groups:{},list_invitations:{},
  create_group:{...req,...group,title:z.string().min(1).max(200),policy},get_group:group,get_group_context:{...group,limit:z.number().int().min(1).max(8).default(4)},
  invite_member:{...req,...group,instanceId:id},join_group:{...req,...group},leave_group:{...req,...group},
@@ -54,7 +63,7 @@ Object.assign(descriptions,{reserve_media_generation:'持久登记一次视频�
 Object.assign(descriptions,{archive_existing_task_media:'当前组manager以本人身份独立归档已存在的视频，须有任务文件读写权限并已读原负责人受控文本结果；broker核原目录、文件身份、容器和总SHA，不补记生成意图或证明平台来源'});
 export function createCollaborationMcp({store,identity,audit=()=>{},signal}){
  const lifecycle=new AbortController(),pending=new Set();
- const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.13'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
+ const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.14'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
  for(const name of collaborationToolNames(identity.kind)){
   const shape=(identity.kind==='service_admin'?adminSchemas:memberSchemas)[name];
   server.registerTool(name,{description:descriptions[name]??'按固定成员、当前组和记录ACL执行受限协作操作',inputSchema:z.object(shape).strict()},(args,extra)=>{

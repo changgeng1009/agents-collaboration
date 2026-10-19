@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {randomUUID,createHash} from 'node:crypto';
-import {fail} from './policy.mjs';
+import {fail,sha256} from './policy.mjs';
 import {SessionFiles,sessionPath} from './session-files.mjs';
 import {operateTaskFile} from './collaboration-file-boundary.mjs';
 
@@ -46,13 +46,44 @@ function withMediaFile(store,task,relativePath,expected,action,{archive=false}={
   files.verify();sessionPath(file);if(archive)rejectWindowsReparse(task,file);requireBrokerMediaBoundary(store,task);for(const current of [fs.fstatSync(fd,{bigint:true}),fs.lstatSync(file,{bigint:true})]){ordinary(current);if(!same(identityOf(opened),identityOf(current)))fail('MEDIA_FILE_CHANGED','视频读取时发生变化。');}return result;
  }finally{fs.closeSync(fd);}
 }
-function inspectMedia(store,task,relativePath,options){return withMediaFile(store,task,relativePath,null,(fd,stat)=>{
+function inspectMedia(store,task,relativePath,options,contentType='video'){return withMediaFile(store,task,relativePath,null,(fd,stat)=>{
  const hash=createHash('sha256'),buffer=Buffer.alloc(1024*1024),header=Buffer.alloc(Math.min(4096,Number(stat.size)));let offset=0;
  while(offset<Number(stat.size)){const count=fs.readSync(fd,buffer,0,Math.min(buffer.length,Number(stat.size)-offset),offset);if(!count)fail('MEDIA_FILE_CHANGED','视频读取未完成。');if(offset===0)buffer.copy(header,0,0,header.length);hash.update(buffer.subarray(0,count));offset+=count;}
- return{relativePath,area:'outputs',byteLength:offset,sha256:hash.digest('hex'),mimeType:mimeOf(header,relativePath),fileIdentity:identityOf(stat),containerSignatureVerified:true,wholeFileHashVerifiedAtRegistration:true,playabilityVerified:false,fullVideoViewed:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false};
+ let mimeType;
+ if(contentType==='video')mimeType=mimeOf(header,relativePath);
+ else if(contentType==='audio'){
+  if(path.extname(relativePath).toLowerCase()!=='.wav'||header.toString('ascii',0,4)!=='RIFF'||header.toString('ascii',8,12)!=='WAVE')fail('CONTENT_AUDIO_FORMAT_INVALID','本地配音版本须有WAV容器签名。');
+  mimeType='audio/wav';
+ }else{
+  if(offset>32768||path.extname(relativePath).toLowerCase()!=='.srt')fail('CONTENT_SUBTITLE_FORMAT_INVALID','字幕版本须为有界UTF-8 SRT文件。');
+  const text=Buffer.alloc(offset);let count=0;while(count<text.length){const read=fs.readSync(fd,text,count,text.length-count,count);if(!read)fail('MEDIA_FILE_CHANGED','字幕读取不完整。');count+=read;}
+  if(!/\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}/.test(new TextDecoder('utf-8',{fatal:true}).decode(text)))fail('CONTENT_SUBTITLE_FORMAT_INVALID','字幕缺少合法时间行。');
+  mimeType='application/x-subrip';
+ }
+ return{relativePath,area:'outputs',byteLength:offset,sha256:hash.digest('hex'),mimeType,fileIdentity:identityOf(stat),containerSignatureVerified:true,wholeFileHashVerifiedAtRegistration:true,playabilityVerified:false,fullVideoViewed:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false};
 },options);}
 export class CollaborationMedia{
  constructor(store){this.store=store;}
+ inspectContentOutput(identity,args,{write=true}={}){
+  const task=this.task(identity,args,{write}),extension=path.extname(args.relativePath).toLowerCase(),contentType=['.mp4','.webm'].includes(extension)?'video':extension==='.wav'?'audio':extension==='.srt'?'subtitles':null;
+  if(!contentType)fail('CONTENT_OUTPUT_FORMAT_UNSUPPORTED','制作输出只登记明确的视频、WAV或SRT版本。');
+  return{...inspectMedia(this.store,task,args.relativePath,{archive:true},contentType),contentType,evidence:'broker_file_readback'};
+ }
+ probeContentOutput(identity,args){
+  const task=this.task(identity,args),pin=this.store.contentMediaTools?.ffprobe;
+  if(!pin||!path.isAbsolute(pin.path??'')||path.basename(pin.path).toLowerCase()!=='ffprobe.exe'||!/^[a-f0-9]{64}$/.test(pin.sha256??'')||sha256(fs.readFileSync(pin.path))!==pin.sha256)fail('CONTENT_QUALITY_PROBE_REQUIRED','没有可信宿主固定的只读探测工具，不能验证实际媒体范围。');
+  const before=this.inspectContentOutput(identity,args,{write:false}),file=new SessionFiles({workspace:task.workspace,scope:task.scope}).target('outputs',args.relativePath);
+  const observationId=randomUUID(),directory=sessionPath(path.join(task.workspace.work,'content-quality',observationId),false);fs.mkdirSync(directory,{recursive:true});
+  const startedAt=now(),result=spawnSync(pin.path,['-v','error','-protocol_whitelist','file,pipe','-show_streams','-show_format','-of','json',file],{cwd:task.workspace.cwd,windowsHide:true,shell:false,timeout:10000,maxBuffer:65536,stdio:['ignore','pipe','pipe']});
+  const stdout=result.stdout??Buffer.alloc(0),stderr=result.stderr??Buffer.alloc(0),completion={startedAt,completedAt:now(),toolSha256:pin.sha256,exitCode:result.status,signal:result.signal,error:result.error?.code??null,stdoutSha256:sha256(stdout),stderrSha256:sha256(stderr),completion:'synchronous_process_returned',asyncExitCloseEventsClaimed:false};
+  for(const[name,bytes]of [['stdout.json',stdout],['stderr.log',stderr],['completion.json',Buffer.from(JSON.stringify(completion,null,2))]])fs.writeFileSync(path.join(directory,name),bytes,{flag:'wx'});
+  if(result.error||result.status!==0)fail('CONTENT_MEDIA_PROBE_UNVERIFIED','实际视频探测失败，日志保留，不把目标时长当实际时长。');
+  const after=this.inspectContentOutput(identity,args,{write:false});if(before.sha256!==after.sha256||!same(before.fileIdentity,after.fileIdentity))fail('CONTENT_VERSION_FILE_CHANGED','探测期间媒体身份或内容变化。');
+  const probe=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(stdout)),durationMs=Math.round(Number(probe.streams?.find(stream=>stream.codec_type==='video')?.duration??probe.format?.duration)*1000);
+  if(!Number.isSafeInteger(durationMs)||durationMs<1||durationMs>600000)fail('CONTENT_MEDIA_DURATION_UNVERIFIED','没有取得有界真实视频时长。');
+  const observation={observationId,groupId:args.groupId,taskId:args.taskId,observedBy:'trusted_media_probe',requestedBy:identity.instanceId,actorActuallyCalledAgentTool:false,sourceSha256:before.sha256,sourceByteLength:before.byteLength,durationMs,streams:(probe.streams??[]).map(stream=>({type:stream.codec_type,codec:stream.codec_name,width:stream.width??null,height:stream.height??null,sampleRate:stream.sample_rate??null,channels:stream.channels??null})),localProcessObserved:true,toolSha256:pin.sha256,stdoutSha256:sha256(stdout),completion,at:now(),evidenceLevel:process.env.COLLAB_TEST_MODE==='1'?'local_test':'host_local_observation',modelExecutionVerified:false,businessCompletedVerified:false};
+  this.store.put('content_host_observation',observationId,observation);return observation;
+ }
  task(identity,args,{write=false}={}){const task=this.store.task(identity,args.groupId,args.taskId);if(!task.workspace||!task.scope)fail('WORKSPACE_NOT_READY','当前任务目录尚未就绪。');if(!task.fileAcl.readers.includes(identity.instanceId)||(write&&!task.fileAcl.writers.includes(identity.instanceId)))fail('FILE_ACL_FORBIDDEN','视频操作须有当前任务明确文件读写权限。');new SessionFiles({workspace:task.workspace,scope:task.scope});return task;}
  archiveSource(identity,args){
   const store=this.store;store.manager(identity,args.groupId);const task=this.task(identity,args,{write:true}),source=store.artifact(identity,args.groupId,args.sourceArtifactId);

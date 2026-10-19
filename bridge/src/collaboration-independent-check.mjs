@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {verifyIndependentEvidence} from './independent-evidence.mjs';
 
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function assessIndependentRun({independentEnvironment=false,baseline=[],observations=[],peers=[],source='fixture'}){
@@ -21,7 +22,8 @@ export function assessIndependentRun({independentEnvironment=false,baseline=[],o
   if(!closedAt||!peer.executedAfterClosure||!peer.receiverReadbackAfterClosure)blockers.push('G_POST_CLOSURE_EXECUTION_AND_PEER_READBACK_REQUIRED');
  }
  if(peers.length!==2)blockers.push('G_TWO_REAL_PLATFORMS_REQUIRED');
- return{status:blockers.length?'blocked':'passed',gVerified:blockers.length===0,blockers:[...new Set(blockers)],businessCompletedVerified:false,parentExitIsCodexClosure:false,automaticRetry:false};
+ if(!blockers.length)blockers.push('G_TRUSTED_EXTERNAL_BUNDLE_REQUIRED');
+ return{status:'blocked',gVerified:false,blockers:[...new Set(blockers)],businessCompletedVerified:false,parentExitIsCodexClosure:false,automaticRetry:false};
 }
 function sampleWindowsApp(config){
  // 全部同安装目录的应用进程必须消失；不只检查某个PID或launcher。不终止任何进程。
@@ -58,11 +60,11 @@ export async function collectIndependentRun(config){
      // 当前核心没有可信模型开始与对端读回阶段，保持阻塞；不接受配置自报来填这两项。
      peerEvidence.push({platform:peer.platform,mode:peer.mode,identityVerified:peer.identityVerified,execution,native,executedAfterClosure:false,receiverReadbackAfterClosure:false});append({event:'execution_observed',platform:peer.platform,executionId:execution.executionId,state:execution.state,evidenceLevel:execution.evidenceLevel,replySha256:hash(execution.replyText??null),nativeHash:hash(native.nativeId)});
     }
-    const result=assessIndependentRun({independentEnvironment:true,baseline,observations,peers:peerEvidence,source:'direct_windows_and_mcp_observation'});append({event:'assessment',...result});if(result.gVerified)break;
+    const result=config.evidenceBundle?verifyIndependentEvidence(config.evidenceBundle):assessIndependentRun({independentEnvironment:true,baseline,observations,peers:peerEvidence,source:'direct_windows_and_mcp_observation'});append({event:'assessment',...result});if(result.gVerified)break;
    }
    await new Promise(resolve=>setTimeout(resolve,1000));
   }
-  const result=assessIndependentRun({independentEnvironment:true,baseline,observations,peers:peerEvidence,source:'direct_windows_and_mcp_observation'});append({event:'final',...result});fs.writeFileSync(path.join(directory,'result.json'),JSON.stringify({...result,journalSha256:previousHash},null,2),{flag:'wx'});return result;
+  const result=config.evidenceBundle&&observations.length>=2?verifyIndependentEvidence(config.evidenceBundle):assessIndependentRun({independentEnvironment:true,baseline,observations,peers:peerEvidence,source:'direct_windows_and_mcp_observation'});append({event:'final',...result});fs.writeFileSync(path.join(directory,'result.json'),JSON.stringify({...result,journalSha256:previousHash},null,2),{flag:'wx'});return result;
  }catch(error){append({event:'blocked',code:error.code??'G_OBSERVATION_FAILED',message:error.message,gVerified:false,automaticRetry:false});throw error;}
  finally{await Promise.allSettled(clients.map(client=>client.close()));fs.closeSync(fd);}
 }

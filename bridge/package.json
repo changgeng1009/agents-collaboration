@@ -1,6 +1,6 @@
 {
   "name": "independent-agent-collaboration",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "private": true,
   "type": "module",
   "description": "独立多成员协作核心及兼容本地通信桥",
@@ -29,7 +29,21 @@
     "test:market-controlled": "\"%npm_node_execpath%\" ../tests/market-controlled.integration.mjs",
     "test:collaboration-media": "\"%npm_node_execpath%\" ../tests/collaboration-media.integration.mjs",
     "test:collaboration-media-archive": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs",
-    "test:media-lifecycle": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs --lifecycle-only"
+    "test:media-lifecycle": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs --lifecycle-only",
+    "test:content": "\"%npm_node_execpath%\" ../tests/collaboration-content.integration.mjs",
+    "test:content-quality": "\"%npm_node_execpath%\" ../tests/collaboration-content-quality.integration.mjs",
+    "test:quality": "\"%npm_node_execpath%\" ../tests/content-quality.integration.mjs",
+    "test:content-media": "\"%npm_node_execpath%\" ../tests/content-media.integration.mjs",
+    "test:content-source": "\"%npm_node_execpath%\" ../tests/content-media-source.integration.mjs",
+    "test:content-fresh": "\"%npm_node_execpath%\" ../tests/content-fresh-recovery.integration.mjs",
+    "test:content-download": "\"%npm_node_execpath%\" ../tests/content-download.integration.mjs",
+    "test:content-voice": "\"%npm_node_execpath%\" ../tests/content-voice.integration.mjs",
+    "test:content-expert-inputs": "\"%npm_node_execpath%\" ../tests/content-expert-inputs.integration.mjs",
+    "test:platform-contracts": "\"%npm_node_execpath%\" ../tests/platform-content-contracts.integration.mjs",
+    "test:independent-evidence": "\"%npm_node_execpath%\" ../tests/independent-evidence.integration.mjs",
+    "test:release-recovery": "\"%npm_node_execpath%\" ../tests/release-recovery.integration.mjs",
+    "test:configured-service": "\"%npm_node_execpath%\" ../tests/configured-service.integration.mjs",
+    "test:release-candidate": "\"%npm_node_execpath%\" ../tests/release-candidate.integration.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

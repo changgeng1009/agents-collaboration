@@ -1,0 +1,34 @@
+import {FIXTURE_ROOT} from './test-context.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import http from 'node:http';
+import {ControlledContentMediaWorker} from '../bridge/src/content-media-worker.mjs';
+
+const hash=bytes=>createHash('sha256').update(bytes).digest('hex'),checks=[];
+const taskRoot=path.join(FIXTURE_ROOT,'task-workspaces/collector_fixture');
+for(const area of ['inputs','work','outputs'])fs.mkdirSync(path.join(taskRoot,area,'files'),{recursive:true});
+const marker=Buffer.from(JSON.stringify({taskId:'collector_fixture',owner:'collaboration-core',groupId:'source_group',logicalTaskId:'collector_task',bindingId:'synthetic_collector_binding'}));fs.writeFileSync(path.join(taskRoot,'.task-binding.json'),marker);
+const bytes=Buffer.from([0,0,0,24,102,116,121,112,105,115,111,109,0,0,0,0,105,115,111,109,109,112,52,50]),briefSha256=hash(Buffer.from('合成来源合同'));
+fs.writeFileSync(path.join(taskRoot,'inputs/files/incoming.mp4'),bytes);
+const original={actorId:'producer',groupId:'source_group',taskId:'producer_task',sourceId:'approved_original',briefSha256,origin:'local_fixture'};
+const receipt=Buffer.from(JSON.stringify(original));fs.writeFileSync(path.join(taskRoot,'work/files/original.json'),receipt);
+const config={taskRoot,markerSha256:hash(marker),groupId:'source_group',taskId:'collector_task',actorId:'collector',briefSha256,tools:{},sources:[{sourceId:'approved_original',producerId:'producer',sourceTaskId:'producer_task',kind:'task_file',area:'inputs',relativePath:'incoming.mp4',sha256:hash(bytes),byteLength:bytes.length,sourceReceipt:{area:'work',relativePath:'original.json',sha256:hash(receipt),byteLength:receipt.length}}],approvalPin:null};
+const worker=new ControlledContentMediaWorker(config,{fixture:true});
+const recovered=await worker.recover({operationId:'collect_original',sourceId:'approved_original',outputRelativePath:'recovered.mp4'});
+assert.equal(recovered.status,'succeeded',JSON.stringify(recovered));
+assert.equal(recovered.sourceProducerId,'producer');
+assert.equal(recovered.requestedActorId,'collector');
+assert.equal(recovered.actorActuallyCalledAgentTool,false);
+assert.equal(recovered.output.sha256,hash(bytes));
+checks.push({name:'原producer与受控collector分列，独立回收不冒充原Agent本人',passed:true});
+fs.writeFileSync(path.join(taskRoot,'outputs/files/recovered.mp4'),Buffer.from('changed'));
+const changed=await worker.recover({operationId:'collect_original',sourceId:'approved_original',outputRelativePath:'recovered.mp4'});
+assert.equal(changed.status,'unknown','去重不能在原输出变化后重放成功');
+assert.equal(changed.reason,'CONTENT_MEDIA_OUTPUT_CHANGED');
+checks.push({name:'输出篡改后去重返回当前未知停点，不自动复制补偿',passed:true});
+const httpRoot=path.join(FIXTURE_ROOT,'task-workspaces/http_collector_fixture');for(const area of ['inputs','work','outputs'])fs.mkdirSync(path.join(httpRoot,area,'files'),{recursive:true});fs.writeFileSync(path.join(httpRoot,'.task-binding.json'),marker);
+let requests=0;const server=http.createServer((req,res)=>{requests++;res.writeHead(200,{'content-length':bytes.length});res.end(bytes);});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+try{const url=`http://127.0.0.1:${server.address().port}/media`,originalHttp=Buffer.from(JSON.stringify({...original,url}));fs.writeFileSync(path.join(httpRoot,'work/files/original.json'),originalHttp);const httpConfig={...config,taskRoot:httpRoot,sources:[{...config.sources[0],kind:'https',url,allowedHosts:['127.0.0.1'],sourceReceipt:{area:'work',relativePath:'original.json',sha256:hash(originalHttp),byteLength:originalHttp.length}}]},httpWorker=new ControlledContentMediaWorker(httpConfig,{fixture:true});const result=await httpWorker.recover({operationId:'http_once',sourceId:'approved_original',outputRelativePath:'http.mp4'});assert.equal(result.status,'succeeded',JSON.stringify(result));assert.equal(result.output.sha256,hash(bytes));assert.equal(requests,1);const realCandidate=new ControlledContentMediaWorker(httpConfig);assert.equal(realCandidate.prepare('collection',{operationId:'real_once',sourceId:'approved_original',outputRelativePath:'other.mp4'}).launchAllowed,false);await assert.rejects(realCandidate.recover({operationId:'real_once',sourceId:'approved_original',outputRelativePath:'other.mp4'}),{code:'CONTENT_MEDIA_TEST_REAL_FORBIDDEN'});assert.equal(requests,1);checks.push({name:'受控回收只接受原回执固定URL，测试模式不能启动真实候选',passed:true});}finally{await new Promise(resolve=>server.close(resolve));}
+const directory=path.join(FIXTURE_ROOT,'logs/content-media-source-tests');fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(path.join(directory,'summary.json'),JSON.stringify({status:'passed',checks,recovered,fixtureRoot:FIXTURE_ROOT,realNetworkCalls:0,modelCalls:0},null,2));console.log(JSON.stringify({status:'passed',checks:checks.length,fixtureRoot:FIXTURE_ROOT}));

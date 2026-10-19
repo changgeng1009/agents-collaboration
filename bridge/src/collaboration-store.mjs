@@ -9,6 +9,7 @@ import { sessionPath, readBoundedFile, createFileScope, SessionFiles } from './s
 import { parseCollaborationArgs, collaborationToolNames } from './collaboration-tools.mjs';
 import { CollaborationInbox } from './collaboration-inbox.mjs';
 import { CollaborationMedia, MEDIA_TOOLS } from './collaboration-media.mjs';
+import {CollaborationContent,CONTENT_TOOLS} from './collaboration-content.mjs';
 import {reviewPreparedWorkspaces,verifyPreparedWorkspace,copyPreparedBrief,safeLocalDirectoryName} from './collaboration-workspaces.mjs';
 
 export const COLLABORATION_RUNTIME_ROOT=path.join(RUNTIME_ROOT,'collaboration-core');
@@ -21,10 +22,11 @@ const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 
 export class CollaborationStore{
  #issued=new WeakSet();
- constructor({dbPath,runtimeNamespace=null,preparedWorkspaces=[],executionProvider=null,fileWorker=null,allowPausedFixtures=false}={}){
+ constructor({dbPath,runtimeNamespace=null,preparedWorkspaces=[],executionProvider=null,fileWorker=null,contentMediaTools=null,allowPausedFixtures=false}={}){
   if(runtimeNamespace!==null&&!safeLocalDirectoryName(runtimeNamespace))fail('RUNTIME_NAMESPACE_INVALID','独立运行命名空间必须是可信启动指定的安全标识。');
   this.runtimeRoot=runtimeNamespace===null?COLLABORATION_RUNTIME_ROOT:path.join(COLLABORATION_RUNTIME_ROOT,runtimeNamespace);this.preparedWorkspaces=reviewPreparedWorkspaces(preparedWorkspaces);
   this.fileWorker=fileWorker;
+  this.contentMediaTools=contentMediaTools?structuredClone(contentMediaTools):null;
   this.executionProvider=executionProvider;this.allowPausedFixtures=allowPausedFixtures===true&&process.env.COLLAB_TEST_MODE==='1'&&PROJECT_ROOT!==SOURCE_ROOT;
   fs.mkdirSync(sessionPath(this.runtimeRoot,false),{recursive:true});
   this.dbPath=sessionPath(dbPath??path.join(this.runtimeRoot,'collaboration.sqlite'),false);if(!inside(this.runtimeRoot,this.dbPath))fail('DATABASE_SCOPE','协作数据库只能位于可信独立运行命名空间。');
@@ -40,6 +42,7 @@ export class CollaborationStore{
   this.databaseIdentity=this.fileIdentity(this.dbPath);
   this.inbox=new CollaborationInbox(this);
   this.media=new CollaborationMedia(this);
+  this.content=new CollaborationContent(this);
  }
  fileIdentity(file){const stat=fs.lstatSync(sessionPath(file),{bigint:true});if(!stat.isFile()||stat.nlink!==1n)fail('DATABASE_IDENTITY','协作数据文件必须是单链接普通文件。');return{dev:String(stat.dev),ino:String(stat.ino),birthtimeNs:String(stat.birthtimeNs)};}
  checkDb(){for(const suffix of['','-wal','-shm','-journal']){const file=sessionPath(this.dbPath+suffix,false);if(fs.existsSync(file)){const identity=this.fileIdentity(file);if(suffix===''&&this.databaseIdentity&&!same(identity,this.databaseIdentity))fail('DATABASE_IDENTITY','数据库路径已被替换。');}else if(suffix===''&&this.databaseIdentity)fail('DATABASE_IDENTITY','数据库路径已丢失。');}}
@@ -107,6 +110,7 @@ export class CollaborationStore{
  async invoke(identity,name,input,context={}){
   const args=parseCollaborationArgs(identity.kind,name,input);this.authorize(identity,name,args);
   if(MEDIA_TOOLS.includes(name))return this.media.invoke(identity,name,args);
+  if(CONTENT_TOOLS.includes(name))return this.content.invoke(identity,name,args);
   if(['open_inbox','wait_for_messages','get_inbox','close_inbox'].includes(name))return this.inbox.invoke(identity,name,args,context);
   if(['open_meeting','get_meeting','submit_statement','stop_meeting','propose_conclusion','review_conclusion'].includes(name)){const{meetingOperation,expireMeetingIfNeeded}=await import('./collaboration-meetings.mjs');if(name!=='open_meeting')this.tx(()=>expireMeetingIfNeeded(this,identity,name,args));return this.perform(identity,name,args,()=>meetingOperation(this,identity,name,args));}
   if(['request_execution','wake_execution','get_execution'].includes(name)){const{executionOperation}=await import('./collaboration-execution.mjs');return executionOperation(this,identity,name,args);}
@@ -126,7 +130,7 @@ export class CollaborationStore{
  }
  handle(identity,name,args){
   const self=identity.instanceId;
-  if(name==='get_capabilities')return{version:'0.2.13',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),executionRoutes:platformRoutes(identity.platform,identity.mode),fileWorkerBoundary:{implemented:true,configured:this.fileWorker!==null,verification:'per_operation_only',unconfiguredMode:'bridge_only',configuredFailureFallback:false,platformOsIsolationVerified:false},managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
+  if(name==='get_capabilities')return{version:'0.2.14',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),executionRoutes:platformRoutes(identity.platform,identity.mode),fileWorkerBoundary:{implemented:true,configured:this.fileWorker!==null,verification:'per_operation_only',unconfiguredMode:'bridge_only',configuredFailureFallback:false,platformOsIsolationVerified:false},managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
   if(name==='list_members')return{members:identity.kind==='service_admin'?this.list('member').filter(member=>member.kind==='member'):this.memberIds(this.group(identity,args.groupId)).map(id=>this.member(id))};
   if(name==='provision_member'){const result=this.provisionMember(args);this.event(identity,name,null,{instanceId:args.instanceId});return result;}
   if(name==='revoke_member'){const target=this.member(args.instanceId);this.db.prepare('UPDATE core_credentials SET active=0 WHERE instance_id=?').run(target.instanceId);target.status='revoked';this.put('member',target.instanceId,target);for(const group of this.list('group'))if(group.members[target.instanceId]?.state==='active'){group.members[target.instanceId].state='revoked';if(group.managerId===target.instanceId){group.managerId=null;this.event(identity,'manager_vacated_by_explicit_revoke',group.groupId,{previousManagerId:target.instanceId,origin:'service_admin_revocation'});}this.put('group',group.groupId,group);}this.event(identity,name,null,{instanceId:target.instanceId});return{instanceId:target.instanceId,status:'revoked'};}

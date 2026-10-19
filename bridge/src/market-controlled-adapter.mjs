@@ -86,6 +86,12 @@ export class ControlledMarketExpertCliAdapter{
   const fields=['schema','contract','phase','turnId','bindingSha256','launchSha256','inputSha256','inputBytes','priorReceiptSha256','evidenceLevel'];
   if(!exact(approval,fields)||approval.schema!=='market_c_phase_approval_v1'||approval.contract!==CONTRACT||approval.phase!==plan.phase||approval.turnId!==plan.turnId||approval.bindingSha256!==plan.bindingSha256||approval.launchSha256!==plan.launchSha256||approval.inputSha256!==input.sha256||approval.inputBytes!==input.byteLength||approval.evidenceLevel!==evidenceLevel||plan.phase==='first'&&approval.priorReceiptSha256!==null)fail('CONTROLLED_APPROVAL_MISMATCH','准确阶段批准与固定计划、输入或证据域不匹配。');
   const claim=claimControlledLaunch(plan,input,approval,evidenceLevel);if(claim.replay)return claim.replay;
+  return executeControlledMarketLaunch(this.#config,plan,input,claim,evidenceLevel,request,context=>this.prepare(context));
+ }
+}
+
+// 可信宿主内部共用进程层；合同、批准和阶段占位由各自外层验证。
+export async function executeControlledMarketLaunch(config,plan,input,claim,evidenceLevel,request,prepare){
   const lifecycle=[],stdin={attempted:false,writeCompleted:false,sha256:input.sha256,byteLength:input.byteLength,imageCount:input.imageCount,imagesAcceptedByProvider:false},readiness={verified:false,cliPid:null,proof:null};
   let child,pid=null,closed={exitCode:null,signal:null},timedOut=false,truncated=false,protocolError=false,failure=null,audit=null,auditError=null,streamFile=null,logPoll,timer,fd=null,outputBytes=0,tail=Buffer.alloc(0);const events=[],stderr=[];
   const note=(type,details={})=>lifecycle.push({type,at:new Date().toISOString(),...details});
@@ -106,7 +112,7 @@ export class ControlledMarketExpertCliAdapter{
    fs.mkdirSync(sessionPath(plan.inputDirectory,false),{recursive:true});fs.mkdirSync(sessionPath(plan.workDirectory,false),{recursive:true});
    for(const[file,value]of[[plan.mcpConfigFile,plan.mcpConfiguration],[plan.bindingFile,plan.memberBinding]])writeExclusive(file,value);
    streamFile=path.join(plan.workDirectory,'native-stream.jsonl');fd=fs.openSync(sessionPath(streamFile,false),'wx');
-   const logBaseline=profileLogSnapshot(this.#config.base.profileRoot);
+   const logBaseline=profileLogSnapshot(config.base.profileRoot);
    const acceptLine=bytes=>{
     if(!bytes.length)return;
     let value;
@@ -127,7 +133,7 @@ export class ControlledMarketExpertCliAdapter{
    child.stdout.on('data',bytes=>{if(!accept(bytes,true))return;tail=Buffer.concat([tail,bytes]);let end;while((end=tail.indexOf(10))>=0){acceptLine(tail.subarray(0,end));tail=tail.subarray(end+1);}});
    child.stderr.on('data',bytes=>{if(accept(bytes))stderr.push(bytes);});child.stdin.on('error',error=>{note('stdin_error',{code:error.code??'STDIN_ERROR'});protocolError=true;terminate('STDIN_WRITE_UNKNOWN');});
    timer=setTimeout(()=>{timedOut=true;terminate(stdin.attempted?'TIMEOUT_UNKNOWN':'CONTROLLED_READINESS_TIMEOUT');},plan.timeoutMs);
-   logPoll=setInterval(()=>{if(!pid||failure||stdin.attempted)return;try{const proof=observeControlledReadiness(this.#config.base.profileRoot,logBaseline,pid);if(!proof)return;const current=this.prepare(request),currentInput=buildControlledMarketInput(current,request.text);if(current.launchSha256!==plan.launchSha256||currentInput.sha256!==input.sha256||pinned(plan.approvalPin,16384).sha256!==plan.approvalPin.sha256)fail('CONTROLLED_PREINPUT_CHANGED','输入前计划或批准发生变化。');readiness.verified=true;readiness.proof=proof;readiness.observedAt=new Date().toISOString();stdin.attempted=true;stdin.attemptedAt=new Date().toISOString();stdin.monotonicNs=process.hrtime.bigint().toString();note('stdin_write',{sha256:input.sha256,byteLength:input.byteLength});child.stdin.end(input.bytes,()=>{stdin.writeCompleted=true;stdin.completedAt=new Date().toISOString();});}catch(error){terminate(error.code??'CONTROLLED_READINESS_INVALID');}},50);
+   logPoll=setInterval(()=>{if(!pid||failure||stdin.attempted)return;try{const proof=observeControlledReadiness(config.base.profileRoot,logBaseline,pid);if(!proof)return;const current=prepare(request),currentInput=buildControlledMarketInput(current,request.text);if(current.launchSha256!==plan.launchSha256||currentInput.sha256!==input.sha256||pinned(plan.approvalPin,16384).sha256!==plan.approvalPin.sha256)fail('CONTROLLED_PREINPUT_CHANGED','输入前计划或批准发生变化。');readiness.verified=true;readiness.proof=proof;readiness.observedAt=new Date().toISOString();stdin.attempted=true;stdin.attemptedAt=new Date().toISOString();stdin.monotonicNs=process.hrtime.bigint().toString();note('stdin_write',{sha256:input.sha256,byteLength:input.byteLength});child.stdin.end(input.bytes,()=>{stdin.writeCompleted=true;stdin.completedAt=new Date().toISOString();});}catch(error){terminate(error.code??'CONTROLLED_READINESS_INVALID');}},50);
    closed=await completed;clearInterval(logPoll);clearTimeout(timer);if(tail.length)acceptLine(tail);
    if(!readiness.verified)failure??='CONTROLLED_READINESS_MISSING';if(!stdin.writeCompleted)failure??='STDIN_WRITE_UNKNOWN';
    try{audit=readCodeBuddyAudit(plan.auditFile,{cwd:plan.cwd,cliPid:pid,toolNames:MARKET_TASK_TOOLS});}catch(error){auditError=error.code??'MCP_AUDIT_UNVERIFIED';}
@@ -136,7 +142,6 @@ export class ControlledMarketExpertCliAdapter{
   Object.assign(receipt,{pid,lifecycle,outputBytes,audit,auditError,turnId:plan.turnId,phase:plan.phase,contract:CONTRACT,bindingSha256:plan.bindingSha256,launchSha256:plan.launchSha256,approvalSha256:plan.approvalPin.sha256,launchIntentFile:claim.intentFile,streamFile,modelRequestState:evidenceLevel==='local_test'?'not_model_local_test':receipt.status==='succeeded'?'native_terminal_success_observed':receipt.reason==='PLATFORM_RESULT_FAILED'?'native_terminal_failure_observed':'unknown',billingState:'unknown',automaticRetry:false,retryPolicy});
   if(fs.existsSync(plan.workDirectory)){writeExclusive(path.join(plan.workDirectory,'stderr.txt'),sanitizeCodeBuddyValue(Buffer.concat(stderr).toString('utf8')));writeExclusive(path.join(plan.workDirectory,'result.json'),receipt);}
   writeExclusive(claim.resultFile,receipt);return receipt;
- }
 }
 
 function writeExclusive(file,value){const fd=fs.openSync(sessionPath(file,false),'wx',0o600);try{fs.writeFileSync(fd,typeof value==='string'?value:JSON.stringify(value,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
