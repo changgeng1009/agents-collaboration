@@ -7,22 +7,10 @@ import {sessionPath,readBoundedFile} from './session-files.mjs';
 import {preparedRootIdentity} from './collaboration-workspaces.mjs';
 import {readCodeBuddyAudit} from './codebuddy-audit.mjs';
 import {sanitizeCodeBuddyValue} from './codebuddy-cli-adapter.mjs';
+import {MARKET_MCP_NAME,MARKET_TASK_TOOLS,MARKET_BUILTIN_DENY_TOOLS,assertMarketToolProfile,marketRuntimeMinimumTools,prepareMarketPreviewCandidate,inspectMarketToolEvidence} from './market-tool-policy.mjs';
+export {MARKET_MCP_NAME,MARKET_TASK_TOOLS,MARKET_BUILTIN_DENY_TOOLS} from './market-tool-policy.mjs';
 
 export const MARKET_EXPERT_MODE='market_expert_cli';
-export const MARKET_MCP_NAME='market_task';
-export const MARKET_TASK_TOOLS=Object.freeze(['get_capabilities','get_task','read_task_file','start_task','submit_task_result']);
-// 已审查CLI实际报告的内置工具。显式deny只是候选防护，原生工具集合仍须严格核对。
-export const MARKET_BUILTIN_DENY_TOOLS=Object.freeze([
- 'Agent','Read','Write','Edit','Bash','PowerShell','Glob','Grep','EnterPlanMode','ExitPlanMode',
- 'TaskCreate','TaskGet','TaskUpdate','TaskList','WebFetch','WebSearch','TaskStop','TaskOutput',
- 'Skill','SkillManage','Component','Mods','AskUserQuestion','AskUserForStructuredInput','StructuredOutput',
- 'ToolSearch','DeferExecuteTool','SendMessage','SendUserMessage','TeamCreate','TeamDelete','NotebookEdit','LSP',
- 'ImageGen','LibraryUpload','VideoGen','AudioTranscribe','Artifact','ArtifactControl','EnterWorktree','LeaveWorktree',
- 'CronCreate','CronDelete','CronList','WeChatReply','WeComReply','PushNotification','ReportFindings','ComputerUse',
- 'ListMcpResources','ReadMcpResource','WaitForMcpServers','Workflow','Monitor','REPL','A2AGetAgentCard',
- 'A2ASendMessage','A2AGetTask','A2ACancelTask','MessageColleague','SpeakInChannel','ChannelTasks',
- 'CreateColleague','CreateChannel','ListColleagues'
-]);
 const proxyScript=fileURLToPath(new URL('./market-expert-task-server.mjs',import.meta.url));
 const safeId=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 const explicitModelId=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(value)&&!['auto','default','default-model','fast-model','balanced-model','primary-model','deep-model'].includes(value.toLowerCase());
@@ -70,7 +58,8 @@ export function inspectMarketSessionTranscript(records,{sessionId,cwd}={}){
 }
 
 // 仅由可信启动传入；不接收成员消息中的程序、profile、根、agent或环境覆盖。
-export function buildMarketExpertPlan(config,{turnId,priorBinding=null}={}){
+export function buildMarketExpertPlan(config,{turnId,priorBinding=null,toolPolicyProfile='strict_mcp_only'}={}){
+ assertMarketToolProfile(toolPolicyProfile);
  if(!exact(config,['enabled','modelId','nodeExecutable','nodeSha256','packageRoot','runtimeVersion','runtimePins','pluginRoot','pluginName','pluginVersion','agentName','pluginPins','profileRoot','profileIdentity','cwd','cwdIdentity','member','timeoutMs','maxOutputBytes']))fail('MARKET_CONFIG_INVALID','独立市场专家配置字段不符合审查格式。');
  if(!explicitModelId(config.modelId))fail('MARKET_MODEL_ID_REQUIRED','必须固定已核实的精确模型ID，不能使用默认或自动路由别名。');
  if(typeof config.enabled!=='boolean'||!safeId(turnId)||!safeId(config.pluginName)||!safeId(config.agentName)||!/^\d+\.\d+\.\d+$/.test(config.pluginVersion??'')||!/^\d+\.\d+\.\d+$/.test(config.runtimeVersion??''))fail('MARKET_CONFIG_INVALID','版本、轮次或专家选择不合法。');
@@ -101,7 +90,7 @@ export function buildMarketExpertPlan(config,{turnId,priorBinding=null}={}){
  const inputDirectory=path.join(config.cwd,'inputs','market-control',turnId),workDirectory=path.join(config.cwd,'work','market-control',turnId),mcpConfigFile=path.join(inputDirectory,'mcp-config.json'),bindingFile=path.join(inputDirectory,'member-binding.json'),auditFile=path.join(workDirectory,'mcp-audit.jsonl');
  const expectedTools=MARKET_TASK_TOOLS.map(name=>`mcp__${MARKET_MCP_NAME}__${name}`),mcpConfiguration={mcpServers:{[MARKET_MCP_NAME]:{type:'stdio',command:config.nodeExecutable,args:[proxyScript,'--binding-file',bindingFile,'--audit-log',auditFile],cwd:config.cwd,env:{COLLAB_PROJECT_ROOT:PROJECT_ROOT,...(process.env.COLLAB_TEST_MODE==='1'?{COLLAB_TEST_MODE:'1'}:{})},alwaysLoad:true}}};
  const args=[script,'--print','--input-format','text','--output-format','stream-json','--verbose','--model',config.modelId,'--plugin-dir',config.pluginRoot,'--agent',`${config.pluginName}:${config.agentName}`,'--tools','','--strict-mcp-config','--mcp-config',mcpConfigFile,'--setting-sources','','--permission-mode','dontAsk','--allowedTools',...expectedTools,'--disallowedTools',...MARKET_BUILTIN_DENY_TOOLS,'--max-turns','8',...(priorBinding?['--resume',priorBinding.sessionId]:[])];
- return{platform:'codebuddy',mode:MARKET_EXPERT_MODE,modelId:config.modelId,command:config.nodeExecutable,args,env,cwd:config.cwd,cwdIdentity:config.cwdIdentity,shell:false,windowsHide:true,timeoutMs:config.timeoutMs,maxOutputBytes:config.maxOutputBytes,inputDirectory,workDirectory,mcpConfigFile,bindingFile,auditFile,mcpConfiguration,memberBinding:{...member,cwd:config.cwd,cwdIdentity:config.cwdIdentity},bindingSha256,priorBinding,proxyScript,proxySha256:sha256(fs.readFileSync(proxyScript)),expectedTools,disallowedBuiltinTools:[...MARKET_BUILTIN_DENY_TOOLS],staticSkillInspection,nativeToolBoundaryVerified:false,configured:true,manifestAgentName:config.agentName,agentSelectedByArgument:`${config.pluginName}:${config.agentName}`,expertRuntimeLoadedVerified:false,modelExecutionVerified:false,optionalSkillsExecuted:false,osIsolationVerified:false};
+ return{platform:'codebuddy',mode:MARKET_EXPERT_MODE,modelId:config.modelId,command:config.nodeExecutable,args,env,cwd:config.cwd,cwdIdentity:config.cwdIdentity,shell:false,windowsHide:true,timeoutMs:config.timeoutMs,maxOutputBytes:config.maxOutputBytes,inputDirectory,workDirectory,mcpConfigFile,bindingFile,auditFile,mcpConfiguration,memberBinding:{...member,cwd:config.cwd,cwdIdentity:config.cwdIdentity},bindingSha256,priorBinding,proxyScript,proxySha256:sha256(fs.readFileSync(proxyScript)),expectedTools,disallowedBuiltinTools:[...MARKET_BUILTIN_DENY_TOOLS],staticSkillInspection,toolPolicyProfile,expertRuntimeMinimumTools:marketRuntimeMinimumTools(),previewCandidate:toolPolicyProfile==='market_expert_preview'?prepareMarketPreviewCandidate(config.pluginRoot,pluginPins):null,nativeToolBoundaryVerified:false,configured:true,manifestAgentName:config.agentName,agentSelectedByArgument:`${config.pluginName}:${config.agentName}`,expertRuntimeLoadedVerified:false,modelExecutionVerified:false,optionalSkillsExecuted:false,osIsolationVerified:false};
 }
 
 export function sameMarketWorkingDirectory(candidate,plan){
@@ -123,28 +112,29 @@ export function checkMarketModelEvidence(events,expectedModelId,{requireAssistan
 }
 
 export function parseMarketExpertEvents(events,{plan,exitCode,signal=null,timedOut=false,truncated=false,protocolError=false,audit=null,evidenceLevel='real_runtime'}){
- const inits=events.filter(item=>item.type==='system'&&item.subtype==='init'),results=events.filter(item=>item.type==='result'),id=inits[0]?.session_id,uses=events.flatMap(item=>item.message?.content??[]).filter(item=>item.type==='tool_use');
+ const inits=events.filter(item=>item.type==='system'&&item.subtype==='init'),results=events.filter(item=>item.type==='result'),id=inits[0]?.session_id;
  let reason=timedOut?'TIMEOUT_UNKNOWN':truncated?'OUTPUT_TRUNCATED':protocolError?'PROTOCOL_INVALID':null;
  if(!reason&&events.some(item=>item.type==='control_request'))reason='INTERACTIVE_CONTROL_REQUIRED';
  if(!reason&&(!inits.length||inits.some(item=>typeof item.session_id!=='string'||!item.session_id.length||item.session_id.length>256||item.session_id.startsWith('-')||/[\x00-\x1f]/.test(item.session_id))))reason='NATIVE_ID_MISSING';
  if(!reason&&(events.some(item=>item.session_id!==undefined&&item.session_id!==id)||(plan.priorBinding&&plan.priorBinding.sessionId!==id)))reason='NATIVE_ID_MISMATCH';
  if(!reason&&inits.some(item=>!sameMarketWorkingDirectory(item.cwd,plan)))reason='CWD_MISMATCH';
  const modelEvidence=checkMarketModelEvidence(events,plan.modelId,{requireAssistant:results.length===1});if(!reason)reason=modelEvidence.reason;
- if(!reason&&inits.some(item=>!Array.isArray(item.tools)||item.tools.length!==plan.expectedTools.length||new Set(item.tools).size!==plan.expectedTools.length||item.tools.some(name=>!plan.expectedTools.includes(name))))reason='TOOL_SET_VIOLATION';
+ const toolEvidence=inspectMarketToolEvidence(events,{plan,audit});if(!reason)reason=toolEvidence.reason;
  if(!reason&&inits.some(item=>!Array.isArray(item.mcp_servers)||item.mcp_servers.length!==1||item.mcp_servers[0]?.name!==MARKET_MCP_NAME||item.mcp_servers[0]?.status!=='connected'))reason='MCP_STATE_UNVERIFIED';
- if(!reason&&uses.some(item=>!plan.expectedTools.includes(item.name)))reason='TOOL_SET_VIOLATION';
- if(!reason&&(!audit?.verified||uses.some(item=>!audit.toolCalls?.some(call=>item.name===`mcp__${MARKET_MCP_NAME}__${call.toolName}`&&call.argumentsSha256===sha256(JSON.stringify(item.input))))))reason='MCP_AUDIT_UNVERIFIED';
+ if(!reason&&!audit?.verified)reason='MCP_AUDIT_UNVERIFIED';
  if(!reason&&results.length!==1)reason='RESULT_MISSING';
  if(!reason&&(results[0].session_id!==id||(results[0].cwd!==undefined&&!sameMarketWorkingDirectory(results[0].cwd,plan))))reason='RESULT_BINDING_MISMATCH';
  if(!reason&&(signal||exitCode!==0||results[0].is_error!==false||results[0].subtype!=='success'||typeof results[0].result!=='string'))reason='PLATFORM_RESULT_FAILED';
- const status=reason?(reason==='PLATFORM_RESULT_FAILED'?'failed':'unknown'):'succeeded';
- return{status,reason,nativeBinding:status==='succeeded'?{sessionId:id,nativeFieldName:'session_id',modelId:plan.modelId,bindingSha256:plan.bindingSha256,status,evidenceLevel}:null,platform:'codebuddy',mode:MARKET_EXPERT_MODE,evidenceLevel,modelEvidence,reportedModelBindingMatched:!reason&&modelEvidence.initCount>0&&modelEvidence.assistantCount>0,modelIdentityVerified:evidenceLevel==='real_runtime'&&!reason&&modelEvidence.initCount>0&&modelEvidence.assistantCount>0,result:results.length===1?sanitizeCodeBuddyValue(results[0]):null,expertRuntimeLoadedVerified:false,expertRuntimeBlocker:'REVIEWED_RUNTIME_AGENT_SELECTION_EVIDENCE_REQUIRED',modelExecutionVerified:false,businessCompletedVerified:false,optionalSkillsExecuted:false,osIsolationVerified:false,mcpAuditVerified:audit?.verified===true,actualTaskReadAndSubmitObserved:!reason&&['get_task','read_task_file','start_task','submit_task_result'].every(name=>audit.toolCalls.some(call=>call.toolName===name)),processExitCode:exitCode,signal,timedOut,truncated};
+ const preview=toolEvidence.profile==='market_expert_preview',status=reason?(reason==='PLATFORM_RESULT_FAILED'?'failed':'unknown'):preview?'preview_only':'succeeded';
+ return{status,reason,nativeBinding:status==='succeeded'?{sessionId:id,nativeFieldName:'session_id',modelId:plan.modelId,bindingSha256:plan.bindingSha256,status,evidenceLevel}:null,platform:'codebuddy',mode:MARKET_EXPERT_MODE,evidenceLevel,modelEvidence,toolEvidence,acceptance:toolEvidence.acceptance,expertRuntimeMinimumTools:toolEvidence.expertRuntimeMinimumTools,protocolSucceeded:!reason,originalUnknownResolved:false,safeToRetry:false,reportedModelBindingMatched:!reason&&modelEvidence.initCount>0&&modelEvidence.assistantCount>0,modelIdentityVerified:!preview&&evidenceLevel==='real_runtime'&&!reason&&modelEvidence.initCount>0&&modelEvidence.assistantCount>0,result:results.length===1?sanitizeCodeBuddyValue(results[0]):null,expertRuntimeLoadedVerified:false,expertRuntimeBlocker:'REVIEWED_RUNTIME_AGENT_SELECTION_EVIDENCE_REQUIRED',modelExecutionVerified:false,businessCompletedVerified:false,optionalSkillsExecuted:false,osIsolationVerified:false,mcpAuditVerified:audit?.verified===true,actualTaskReadAndSubmitObserved:!reason&&['get_task','read_task_file','start_task','submit_task_result'].every(name=>audit.toolCalls.some(call=>call.toolName===name)),processExitCode:exitCode,signal,timedOut,truncated};
 }
 
 export class MarketExpertCliAdapter{
- constructor(config,{fixture=false}={}){if(fixture&&(process.env.COLLAB_TEST_MODE!=='1'||PROJECT_ROOT===SOURCE_ROOT||!inside(PROJECT_ROOT,config.nodeExecutable)))fail('MARKET_FIXTURE_FORBIDDEN','fixture仅允许隔离项目内的显式测试入口。');this.config=config;this.evidenceLevel=fixture?'local_test':'real_runtime';this.platform='codebuddy';this.mode=MARKET_EXPERT_MODE;}
- prepare(context){return buildMarketExpertPlan(this.config,context);}
+ constructor(config,{fixture=false,toolPolicyProfile='strict_mcp_only'}={}){assertMarketToolProfile(toolPolicyProfile);Object.defineProperty(this,'toolPolicyProfile',{value:toolPolicyProfile,enumerable:true});if(fixture&&(process.env.COLLAB_TEST_MODE!=='1'||PROJECT_ROOT===SOURCE_ROOT||!inside(PROJECT_ROOT,config.nodeExecutable)))fail('MARKET_FIXTURE_FORBIDDEN','fixture仅允许隔离项目内的显式测试入口。');this.config=config;this.evidenceLevel=fixture?'local_test':'real_runtime';this.platform='codebuddy';this.mode=MARKET_EXPERT_MODE;}
+ prepare(context){return buildMarketExpertPlan(this.config,{...context,toolPolicyProfile:this.toolPolicyProfile});}
  async run({turnId,prompt,priorBinding=null}){
+  // 预览没有生效开关；必须早于prepare、core预检、持久意图和任何子进程。
+  if(this.toolPolicyProfile==='market_expert_preview')fail('MARKET_TOOL_POLICY_PENDING','专家工具策略仅供离线预览，实际权限与依赖未取证，不允许启动或恢复。');
   if(this.config.enabled!==true)fail('MARKET_ADAPTER_DISABLED','市场专家候选未由可信启动启用。');if(typeof prompt!=='string'||!prompt.length||Buffer.byteLength(prompt)>32768)fail('MARKET_PROMPT_INVALID','仅接受有界正文。');if(process.env.COLLAB_TEST_MODE==='1'&&this.evidenceLevel!=='local_test')fail('TEST_OFFICIAL_EXECUTION_FORBIDDEN','离线测试禁止真实模型入口。');if(priorBinding&&priorBinding.evidenceLevel!==this.evidenceLevel)fail('MARKET_RESUME_BINDING','fixture与真实会话不能混用。');
   const plan=this.prepare({turnId,priorBinding});const{invokeMarketTask}=await import('./market-expert-task-server.mjs');await invokeMarketTask(plan.memberBinding,'get_task',{groupId:plan.memberBinding.groupId,taskId:plan.memberBinding.taskId});const claim=claimMarketLaunch(plan,{turnId,priorBinding,prompt,evidenceLevel:this.evidenceLevel});if(claim.replay)return claim.replay;
   fs.mkdirSync(sessionPath(plan.inputDirectory,false),{recursive:true});fs.mkdirSync(sessionPath(plan.workDirectory,false),{recursive:true});

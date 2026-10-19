@@ -81,12 +81,19 @@ export function readCodeBuddyAudit(file, { cwd, cliPid, toolNames = ['get_capabi
   const serverPids = [...new Set(records.map(item => item.pid))];
   if (serverPids.length !== 1) fail('MCP_AUDIT_BINDING_MISMATCH', '任务审计出现多个服务实例，保留未知。');
   if (records.some(item => item.method === 'tools/call' && !toolNames.includes(item.toolName))) fail('MCP_TOOL_VIOLATION', '审计包含非授权工具。');
-  const counts = {};
+  const counts = {}, requestIds = new Set(), responseIds = new Set();
+  for (const record of records) {
+    if (!['client_to_server', 'server_to_client'].includes(record.direction) || !['initialize', 'tools/list', 'tools/call'].includes(record.method) || !['string', 'number'].includes(typeof record.jsonRpcId)) fail('MCP_AUDIT_INCOMPLETE', '审计方向、方法或请求编号不合法。');
+    const key = JSON.stringify(record.jsonRpcId), seen = record.direction === 'client_to_server' ? requestIds : responseIds;
+    if (seen.has(key)) fail('MCP_AUDIT_INCOMPLETE', '审计请求或响应编号重复，不能复用一个回执。');
+    seen.add(key);
+  }
+  if (requestIds.size !== responseIds.size || [...responseIds].some(id => !requestIds.has(id))) fail('MCP_AUDIT_INCOMPLETE', '审计请求和响应须一一对应。');
   for (const method of ['initialize', 'tools/list', 'tools/call']) {
     const calls = records.filter(item => item.direction === 'client_to_server' && item.method === method);
     if ((method !== 'tools/call' && !calls.length) || calls.some(call => !records.some(item => item.direction === 'server_to_client' && item.method === method && item.jsonRpcId === call.jsonRpcId && item.paramsSha256 === call.paramsSha256 && item.success === true && /^[a-f0-9]{64}$/.test(item.resultSha256)))) fail('MCP_AUDIT_INCOMPLETE', '握手与工具清单必须成功，每次声明的能力调用须有成功审计。');
     counts[method] = calls.length;
   }
-  const toolCalls = records.filter(item => item.direction === 'client_to_server' && item.method === 'tools/call').map(item => ({ toolName: item.toolName, argumentsSha256: item.argumentsSha256 }));
+  const toolCalls = records.filter(item => item.direction === 'client_to_server' && item.method === 'tools/call').map(item => ({ toolName: item.toolName, argumentsSha256: item.argumentsSha256, jsonRpcId: item.jsonRpcId }));
   return { verified: true, handshakeVerified: true, callVerified: counts['tools/call'] > 0, file: target, sha256: sha256(bytes), bytes: bytes.length, counts, toolCalls, serverPid: serverPids[0], cliPid, clientInfoIsSelfReported: true, bodyRecorded: false };
 }
