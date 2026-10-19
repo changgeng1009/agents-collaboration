@@ -141,3 +141,5 @@
 !/tests/market-review-policy.integration.mjs
 !/bridge/src/market-plugin-inspection.mjs
 !/tests/market-plugin-loading.integration.mjs
+!/bridge/src/market-controlled-adapter.mjs
+!/tests/market-controlled.integration.mjs

@@ -1,6 +1,6 @@
 {
   "name": "independent-agent-collaboration",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "private": true,
   "type": "module",
   "description": "独立多成员协作核心及兼容本地通信桥",
@@ -26,6 +26,7 @@
     "test:market-policy": "\"%npm_node_execpath%\" ../tests/market-tool-policy.integration.mjs",
     "test:market-review": "\"%npm_node_execpath%\" ../tests/market-review-policy.integration.mjs",
     "test:market-loading": "\"%npm_node_execpath%\" ../tests/market-plugin-loading.integration.mjs",
+    "test:market-controlled": "\"%npm_node_execpath%\" ../tests/market-controlled.integration.mjs",
     "test:collaboration-media": "\"%npm_node_execpath%\" ../tests/collaboration-media.integration.mjs",
     "test:collaboration-media-archive": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs",
     "test:media-lifecycle": "\"%npm_node_execpath%\" ../tests/collaboration-media-archive.integration.mjs --lifecycle-only"
