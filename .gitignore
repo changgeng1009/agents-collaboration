@@ -135,3 +135,7 @@
 !/tests/market-expert-inspection.integration.mjs
 !/bridge/src/market-tool-policy.mjs
 !/tests/market-tool-policy.integration.mjs
+!/bridge/src/market-review-evidence.mjs
+!/bridge/src/market-pretool-policy.mjs
+!/bridge/src/market-review-frame-broker.mjs
+!/tests/market-review-policy.integration.mjs
