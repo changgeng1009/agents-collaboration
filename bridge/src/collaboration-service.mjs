@@ -9,7 +9,7 @@ import { PROJECT_ROOT, SOURCE_ROOT, guardedPath, fail, sha256 } from './policy.m
 import { CollaborationStore } from './collaboration-store.mjs';
 import { createCollaborationMcp } from './collaboration-tools.mjs';
 
-export const COLLAB_SERVICE_VERSION = '0.2.14';
+export const COLLAB_SERVICE_VERSION = '0.2.16';
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
 const bodyLimit = 256 * 1024;
 const stamp = () => new Date().toISOString();

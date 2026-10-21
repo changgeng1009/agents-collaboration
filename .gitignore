@@ -167,3 +167,8 @@
 !/tests/release-recovery.integration.mjs
 !/bridge/src/configured-collaboration-service.mjs
 !/tests/configured-service.integration.mjs
+!/bridge/src/qwen-media-adapter.mjs
+!/bridge/scripts/qwen-media.mjs
+!/tests/qwen-media.integration.mjs
+!/bridge/src/qwen-loopback-connect.mjs
+!/tests/qwen-loopback-connect.integration.mjs

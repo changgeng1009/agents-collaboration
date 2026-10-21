@@ -5,6 +5,11 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/qwen-loopback-connect.mjs',
+  'tests/qwen-loopback-connect.integration.mjs',
+  'bridge/src/qwen-media-adapter.mjs',
+  'bridge/scripts/qwen-media.mjs',
+  'tests/qwen-media.integration.mjs',
   'bridge/src/configured-collaboration-service.mjs',
   'tests/configured-service.integration.mjs',
   'tests/release-recovery.integration.mjs',
