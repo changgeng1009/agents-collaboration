@@ -172,3 +172,5 @@
 !/tests/qwen-media.integration.mjs
 !/bridge/src/qwen-loopback-connect.mjs
 !/tests/qwen-loopback-connect.integration.mjs
+!/bridge/src/qwen-error-diagnostics.mjs
+!/tests/qwen-error-diagnostics.integration.mjs

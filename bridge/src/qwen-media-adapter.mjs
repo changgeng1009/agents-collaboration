@@ -5,6 +5,7 @@ import dns from 'node:dns/promises';
 import {createHash} from 'node:crypto';
 import {downloadPinnedSource, isPublicIPv4} from './content-download.mjs';
 import {createLoopbackAgent,validateLoopbackProxy,LOOPBACK_PROXY_ERROR_CODES} from './qwen-loopback-connect.mjs';
+import {collectFailureDiagnostic,containsCredentialMaterial} from './qwen-error-diagnostics.mjs';
 
 export const QWEN_ORIGIN = 'https://maas.qianwenaiapi.com';
 export const QWEN_MODELS = Object.freeze({video:'MiniMax/MiniMax-H3', speech:'MiniMax/speech-2.8-hd'});
@@ -17,9 +18,9 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const canonical = value => JSON.stringify(value && typeof value==='object' ? Array.isArray(value) ? value.map(item=>JSON.parse(canonical(item))) : Object.fromEntries(Object.keys(value).sort().map(key=>[key,JSON.parse(canonical(value[key]))])) : value);
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 const exact = (obj, required, optional=[]) => obj && typeof obj === 'object' && !Array.isArray(obj) && required.every(k=>Object.hasOwn(obj,k)) && Object.keys(obj).every(k=>[...required,...optional].includes(k));
-const safeId = (value, secret='') => id(value) && !/^sk-/i.test(value) && (!secret || !value.includes(secret)) ? value : null;
-const reportedModel = (value,secret) => typeof value==='string' && value.length<=128 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('//') && !/^sk-/i.test(value) && !value.toLowerCase().includes(secret.toLowerCase()) ? value : null;
-const providerCode = value => Number.isSafeInteger(value) ? value : typeof value === 'string' && /^(?:InvalidApiKey|InvalidParameter|InvalidParameter\.[A-Za-z]+|AccessDenied|Unauthorized|Forbidden|ModelNotFound|Throttling(?:\.[A-Za-z]+)?|DataInspectionFailed|InternalError|InvalidTask|NotFound)$/.test(value) ? value : null;
+const safeId = (value, secret='') => id(value) && !/^sk-/i.test(value) && !containsCredentialMaterial(value,secret) ? value : null;
+const reportedModel = (value,secret) => typeof value==='string' && value.length<=128 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('//') && !/^sk-/i.test(value) && !containsCredentialMaterial(value,secret) ? value : null;
+const providerCode = (value,secret='') => !containsCredentialMaterial(value,secret) && (Number.isSafeInteger(value) || typeof value === 'string' && /^(?:InvalidApiKey|InvalidParameter|InvalidParameter\.[A-Za-z]+|AccessDenied|Unauthorized|Forbidden|ModelNotFound|Throttling(?:\.[A-Za-z]+)?|DataInspectionFailed|InternalError|InvalidTask|NotFound)$/.test(value)) ? value : null;
 const inside = (root,file) => file===root || !path.relative(root,file).startsWith('..') && !path.isAbsolute(path.relative(root,file));
 
 // 原生宿主边界：逐级拒绝联接/符号链接，固定目录身份，普通文件只接受一个硬链接。
@@ -136,6 +137,15 @@ export class QwenMediaAdapter {
   requireThat(inside(root,file) && file!==root,'QWEN_PATH_INVALID');return ordinaryPath(file,false);
  }
  #save(file,value) {this.verify();requireThat(inside(this.#base,file),'QWEN_PATH_INVALID');return writeJson(file,value);}
+ #archiveFailure(directory,response,token,kind,phase,result) {
+  const diagnostic=collectFailureDiagnostic(response,{token,kind,phase,context:{request_id:result.request_id,task_id:result.task_id,trace_id:result.trace_id,requestedModel:result.requestedModel}});
+  if(!diagnostic)return null;
+  const available=Object.fromEntries(Object.entries(diagnostic.fields).map(([source,field])=>[source,['available','truncated'].includes(field.state)]));
+  try {
+   const file=path.join(directory,'error-diagnostic.json'),pin=this.#save(file,diagnostic);
+   return {relativePath:path.relative(this.#binding.taskRoot,file).split(path.sep).join('/'),sha256:pin.sha256,fieldsAvailable:available};
+  }catch{return {relativePath:null,sha256:null,fieldsAvailable:available,code:'QWEN_ERROR_DIAGNOSTIC_UNAVAILABLE'};}
+ }
  #reserve(name,value) {
   this.verify();const dir=path.join(this.#base,name);ordinaryPath(dir,false);
   try{fs.mkdirSync(dir);}catch(failure){if(failure.code==='EEXIST')return null;throw error('QWEN_RESERVE_UNKNOWN');}
@@ -188,7 +198,7 @@ export class QwenMediaAdapter {
   try {
    const {httpStatus,body}=await this.#call({...plan,token});
    const rows=body.output?.tasks ?? body.output?.task_list ?? body.tasks ?? body.task_list;
-   receipt={credentialSlot:kind,httpStatus,request_id:safeId(body.request_id,token),code:providerCode(body.code),returnedCount:Array.isArray(rows)?rows.length:null,classification:httpStatus===200?'readonly_endpoint_accepted':[401,403].includes(httpStatus)?'authentication_or_scope_rejected':'http_error',authenticationAccepted:httpStatus===200,modelAccessVerified:false};
+   receipt={credentialSlot:kind,httpStatus,request_id:safeId(body.request_id,token),code:providerCode(body.code,token),returnedCount:Array.isArray(rows)?rows.length:null,classification:httpStatus===200?'readonly_endpoint_accepted':[401,403].includes(httpStatus)?'authentication_or_scope_rejected':'http_error',authenticationAccepted:httpStatus===200,modelAccessVerified:false};
   }catch(failure){receipt={credentialSlot:kind,httpStatus:null,request_id:null,code:safeFailureCode(failure),returnedCount:null,classification:'unknown_no_retry',authenticationAccepted:false,modelAccessVerified:false};}
   this.#save(path.join(dir,'receipt.json'),receipt);return receipt;
  }
@@ -207,7 +217,9 @@ export class QwenMediaAdapter {
   let result={operationId:request.operationId,kind,origin:QWEN_ORIGIN,requestSha256,payloadSha256,requestedModel:QWEN_MODELS[kind],actualModelIdentity:null,actualModelIdentityVerified:false,status:'unknown',task_id:null,request_id:null,trace_id:null,automaticRetry:false,modelExecutionVerified:false,businessCompletedVerified:false};
   try {
    const response=await this.#call({method:'POST',url:QWEN_ORIGIN+POST_PATHS[kind],body,token,async:kind==='video',maxBodyBytes:kind==='speech'?LIMIT:1048576,timeoutMs:kind==='speech'?120000:15000});
-   const output=response.body.output;result.httpStatus=response.httpStatus;result.request_id=safeId(response.body.request_id,token);result.trace_id=safeId(output?.trace_id ?? response.body.trace_id,token);result.code=providerCode(response.body.code ?? output?.base_resp?.status_code);result.provider_code=result.code;
+   const output=response.body.output;result.httpStatus=response.httpStatus;result.request_id=safeId(response.body.request_id,token);result.trace_id=safeId(output?.trace_id ?? response.body.trace_id,token);result.code=providerCode(response.body.code ?? output?.base_resp?.status_code,token);result.provider_code=result.code;
+   if(kind==='video')result.task_id=safeId(output?.task_id,token);
+   const diagnostic=this.#archiveFailure(opDir,response,token,kind,'execute',result);if(diagnostic)result.diagnostic=diagnostic;
    const returnedModel=response.body.model ?? output?.model;result.actualModelIdentity=reportedModel(returnedModel,token);
    if(kind==='video')result.task_id=safeId(output?.task_id,token);
    requireThat(returnedModel===undefined || returnedModel===null || result.actualModelIdentity===QWEN_MODELS[kind],'QWEN_MODEL_MISMATCH');
@@ -237,7 +249,8 @@ export class QwenMediaAdapter {
   let result={operationId,requestedModel:QWEN_MODELS.video,actualModelIdentity:null,actualModelIdentityVerified:false,task_id:original.task_id,request_id:null,trace_id:null,status:'unknown',automaticRetry:false,modelExecutionVerified:false,businessCompletedVerified:false};
   try {
    const response=await this.#call({method:'GET',url:`${QWEN_ORIGIN}/api/v1/tasks/${original.task_id}`,token,maxBodyBytes:1048576,timeoutMs:15000});
-   const out=response.body.output;result.httpStatus=response.httpStatus;result.request_id=safeId(response.body.request_id,token);result.trace_id=safeId(out?.trace_id ?? response.body.trace_id,token);result.code=providerCode(response.body.code ?? out?.code);
+   const out=response.body.output;result.httpStatus=response.httpStatus;result.request_id=safeId(response.body.request_id,token);result.trace_id=safeId(out?.trace_id ?? response.body.trace_id,token);result.code=providerCode(response.body.code ?? out?.code,token);
+   const diagnostic=this.#archiveFailure(dir,response,token,'video','status',result);if(diagnostic)result.diagnostic=diagnostic;
    const returnedModel=response.body.model ?? out?.model;result.actualModelIdentity=reportedModel(returnedModel,token);
    requireThat(returnedModel===undefined || returnedModel===null || result.actualModelIdentity===QWEN_MODELS.video,'QWEN_MODEL_MISMATCH');
    requireThat(response.httpStatus===200 && out?.task_id===original.task_id && ['PENDING','RUNNING','SUCCEEDED','FAILED','CANCELED','UNKNOWN'].includes(out.task_status),'QWEN_NATIVE_RESULT_UNKNOWN');
