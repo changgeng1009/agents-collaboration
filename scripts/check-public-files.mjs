@@ -5,6 +5,9 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/content-download-proxy.mjs',
+  'tests/content-download-proxy.integration.mjs',
+  'tests/qwen-media-recovery.integration.mjs',
   'bridge/src/qwen-error-diagnostics.mjs',
   'tests/qwen-error-diagnostics.integration.mjs',
   'bridge/src/qwen-loopback-connect.mjs',

@@ -44,7 +44,7 @@ async function main() {
     }
   };
   async function peer(service, who) {
-    const client = new Client({ name: 'isolated_active_client_not_platform', version: '0.2.17' });clients.push(client);
+    const client = new Client({ name: 'isolated_active_client_not_platform', version: '0.2.18' });clients.push(client);
     await client.connect(new StreamableHTTPClientTransport(new URL(service.service.endpoint), { requestInit: { headers: { Authorization: `Bearer ${fs.readFileSync(credentials.get(who), 'utf8')}` } } }));
     return client;
   }
@@ -205,7 +205,7 @@ async function main() {
     });
     // 下半段使用真实隔离 HTTP，不复用生产端口、DB、凭据或真实客户端。
     const service=await startCollaborationService({port:0});services.push(service);const alpha=await peer(service,'alpha'),beta=await peer(service,'beta');
-    await check('HTTP能力分列源码支持、客户端验证与被动唤醒',async()=>{const caps=await tool(beta,'get_capabilities');assert.equal(caps.version,'0.2.17');assert.equal(caps.activeInboxWaitSupported,true);assert.equal(caps.activeClientWaitVerified,false);assert.equal(caps.passiveWakeVerified,false);assert.equal(caps.businessCompletedVerified,false);});
+    await check('HTTP能力分列源码支持、客户端验证与被动唤醒',async()=>{const caps=await tool(beta,'get_capabilities');assert.equal(caps.version,'0.2.18');assert.equal(caps.activeInboxWaitSupported,true);assert.equal(caps.activeClientWaitVerified,false);assert.equal(caps.passiveWakeVerified,false);assert.equal(caps.businessCompletedVerified,false);});
     const httpInbox=(await tool(beta,'open_inbox',{groupId:'http_group',maxMessages:2})).inbox.inboxId;
     const httpWait=tool(beta,'wait_for_messages',waitArgs('http_group',httpInbox,{requestId:'http_late',waitMs:3000}));await pause(150);
     const httpMessage=await tool(alpha,'send_message',{groupId:'http_group',recipientIds:['beta'],body:JSON.stringify({values:[5,11,17]})});const httpRead=await httpWait;

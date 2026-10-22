@@ -174,3 +174,6 @@
 !/tests/qwen-loopback-connect.integration.mjs
 !/bridge/src/qwen-error-diagnostics.mjs
 !/tests/qwen-error-diagnostics.integration.mjs
+!/bridge/src/content-download-proxy.mjs
+!/tests/content-download-proxy.integration.mjs
+!/tests/qwen-media-recovery.integration.mjs

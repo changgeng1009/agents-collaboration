@@ -12,6 +12,8 @@ try {
   case 'readonly-auth':result=await adapter.readonlyAuth(values.kind,values.review);break;
   case 'execute':result=await adapter.execute(adapter.readRequest(values.request));break;
   case 'status':result=await adapter.status(values.operation,values.query,{recover:values.recover});break;
+  case 'recover-plan':result=adapter.recoveryPlan(adapter.readRequest(values.request));break;
+  case 'recover':result=await adapter.recover(adapter.readRequest(values.request));break;
   default:throw Object.assign(new Error(),{code:'QWEN_COMMAND_INVALID'});
  }
  process.stdout.write(JSON.stringify(result,null,2)+'\n');

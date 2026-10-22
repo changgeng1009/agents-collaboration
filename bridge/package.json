@@ -1,11 +1,13 @@
 {
   "name": "independent-agent-collaboration",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "private": true,
   "type": "module",
   "description": "独立多成员协作核心及兼容本地通信桥",
   "engines": { "node": ">=24.0.0" },
   "scripts": {
+    "test:qwen-recovery": "\"%npm_node_execpath%\" --test ../tests/qwen-media-recovery.integration.mjs",
+    "test:content-download-proxy": "\"%npm_node_execpath%\" --test ../tests/content-download-proxy.integration.mjs",
     "test:qwen-diagnostics": "\"%npm_node_execpath%\" --test ../tests/qwen-error-diagnostics.integration.mjs",
     "test:qwen-proxy": "\"%npm_node_execpath%\" --test ../tests/qwen-loopback-connect.integration.mjs",
     "test:qwen-media": "\"%npm_node_execpath%\" --test ../tests/qwen-media.integration.mjs",

@@ -3,7 +3,8 @@ import path from 'node:path';
 import https from 'node:https';
 import dns from 'node:dns/promises';
 import {createHash} from 'node:crypto';
-import {downloadPinnedSource, isPublicIPv4} from './content-download.mjs';
+import {downloadPinnedSource,validateSourceUrl,isPublicIPv4} from './content-download.mjs';
+import {validateDownloadProxy} from './content-download-proxy.mjs';
 import {createLoopbackAgent,validateLoopbackProxy,LOOPBACK_PROXY_ERROR_CODES} from './qwen-loopback-connect.mjs';
 import {collectFailureDiagnostic,containsCredentialMaterial} from './qwen-error-diagnostics.mjs';
 
@@ -22,6 +23,11 @@ const safeId = (value, secret='') => id(value) && !/^sk-/i.test(value) && !conta
 const reportedModel = (value,secret) => typeof value==='string' && value.length<=128 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('//') && !/^sk-/i.test(value) && !containsCredentialMaterial(value,secret) ? value : null;
 const providerCode = (value,secret='') => !containsCredentialMaterial(value,secret) && (Number.isSafeInteger(value) || typeof value === 'string' && /^(?:InvalidApiKey|InvalidParameter|InvalidParameter\.[A-Za-z]+|AccessDenied|Unauthorized|Forbidden|ModelNotFound|Throttling(?:\.[A-Za-z]+)?|DataInspectionFailed|InternalError|InvalidTask|NotFound)$/.test(value)) ? value : null;
 const inside = (root,file) => file===root || !path.relative(root,file).startsWith('..') && !path.isAbsolute(path.relative(root,file));
+const sourceExpiry = url => {
+ const value=url.searchParams.get('Expires');if(value===null)return null;
+ requireThat(/^\d{1,12}$/.test(value) && Number.isFinite(Number(value)*1000),'QWEN_SOURCE_EXPIRY_INVALID');
+ return new Date(Number(value)*1000).toISOString();
+};
 
 // 原生宿主边界：逐级拒绝联接/符号链接，固定目录身份，普通文件只接受一个硬链接。
 // 此边界不宣称提供独立Windows账户或OS隔离。
@@ -256,17 +262,81 @@ export class QwenMediaAdapter {
    requireThat(response.httpStatus===200 && out?.task_id===original.task_id && ['PENDING','RUNNING','SUCCEEDED','FAILED','CANCELED','UNKNOWN'].includes(out.task_status),'QWEN_NATIVE_RESULT_UNKNOWN');
    result.task_status=out.task_status;result.status=out.task_status;result.providerTaskSucceeded=out.task_status==='SUCCEEDED';
    if(out.task_status==='SUCCEEDED') {
-    const url=new URL(out.video_url);requireThat(!url.href.toLowerCase().includes(token.toLowerCase()),'QWEN_RESPONSE_SECRET_REJECTED');result.mediaHost=this.#config.recovery?.allowedHosts?.includes(url.hostname)?url.hostname:null;result.mediaRecoveryPending=true;
-    if(recover) {
-     const policy=this.#config.recovery;requireThat(policy && Array.isArray(policy.allowedHosts) && policy.allowedHosts.includes(url.hostname) && Number.isInteger(policy.maxBytes) && policy.maxBytes>0 && policy.maxBytes<=LIMIT,'QWEN_RECOVERY_REVIEW_REQUIRED');
-     const name=`qwen-${operationId}-${queryId}.mp4`,file=this.#target('outputs',name);
-     const source={url:url.href,mode:'fresh',urlSha256:digest(url.href),allowedHosts:policy.allowedHosts,maxBytes:policy.maxBytes,maxRedirects:0};
-     const downloaded=await downloadPinnedSource(source,file);this.verify();const bytes=readOrdinary(file,policy.maxBytes);
-     requireThat(bytes.length>=8 && bytes.subarray(4,8).toString()==='ftyp','QWEN_VIDEO_TYPE_UNKNOWN');
-     result.output={relativePath:name,sha256:downloaded.sha256,byteLength:downloaded.byteLength};result.mediaRecoveryPending=false;result.modelExecutionVerified=true;result.technicalDecodeVerified=false;
-    }
+    result.mediaRecoveryPending=true;result.mediaRecovery={status:'pending',automaticRetry:false};
+    // 先保留模型终态；私有来源持久化失败只改变回收状态。
+    try {
+     const url=new URL(out.video_url);requireThat(!containsCredentialMaterial(url.href,token),'QWEN_RESPONSE_SECRET_REJECTED');
+     validateSourceUrl({url:url.href,allowedHosts:[url.hostname],mode:'fresh',urlSha256:digest(url.href),maxBytes:LIMIT,maxRedirects:0});
+     const source={schema:'qwen_media_source_v1',taskId:this.#binding.taskId,bindingSha256:this.#config.bindingSha256,origin:QWEN_ORIGIN,operationId,queryId,task_id:original.task_id,providerTaskStatus:'SUCCEEDED',requestedModel:QWEN_MODELS.video,actualModelIdentity:result.actualModelIdentity,request_id:result.request_id,url:url.href,urlSha256:digest(url.href),hostname:url.hostname,expiresAt:sourceExpiry(url),apiAuthenticationAllowedForDownload:false,atUtc:new Date().toISOString()};
+     const sourceFile=path.join(dir,'source-contract.json'),pin=this.#save(sourceFile,source);
+     result.mediaHost=this.#config.recovery?.allowedHosts?.includes(url.hostname)?url.hostname:null;
+     result.sourceContract={area:'work',relativePath:path.relative(path.join(this.#binding.taskRoot,'work'),sourceFile).split(path.sep).join('/'),sha256:pin.sha256};
+    }catch(failure){result.mediaRecovery={status:'blocked',code:safeFailureCode(failure),automaticRetry:false};}
    }
   }catch(failure){result.status='unknown';result.code=safeFailureCode(failure);}
+  this.#save(path.join(dir,'result.json'),result);
+  if(recover && result.sourceContract) {
+   let mediaRecovery;
+   try {
+    // request文件与审批由可信宿主提供；URL、代理、目录权限均不能由命令改变。
+    const name=this.#config.recovery?.automaticRequests?.[queryId];requireThat(typeof name==='string','QWEN_RECOVERY_REVIEW_REQUIRED');
+    const template=this.readRequest(name);requireThat(exact(template,['recoveryId','outputName']),'QWEN_RECOVERY_REQUEST_INVALID');
+    mediaRecovery=await this.#recover({...template,source:result.sourceContract},true);
+   }catch(failure){mediaRecovery={status:'blocked',code:safeFailureCode(failure),automaticRetry:false};}
+   this.#save(path.join(dir,'recovery-link.json'),mediaRecovery);return {...result,mediaRecovery,mediaRecoveryPending:mediaRecovery.status!=='succeeded',...(mediaRecovery.output?{output:mediaRecovery.output,modelExecutionVerified:true,technicalDecodeVerified:false}:{})};
+  }
+  return result;
+ }
+ #recoveryContext(request,automatic=false) {
+  this.verify();requireThat(exact(request,['recoveryId','source','outputName']) && id(request.recoveryId) && exact(request.source,['area','relativePath','sha256']) && ['inputs','work'].includes(request.source.area) && /^[a-f0-9]{64}$/.test(request.source.sha256) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.mp4$/.test(request.outputName),'QWEN_RECOVERY_REQUEST_INVALID');
+  const bytes=readOrdinary(this.#target(request.source.area,request.source.relativePath),32768);requireThat(digest(bytes)===request.source.sha256,'QWEN_RECOVERY_SOURCE_CHANGED');
+  let source;try{source=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw error('QWEN_RECOVERY_SOURCE_INVALID');}
+  const policy=this.#config.recovery,approval=policy?.approvals?.[request.recoveryId],requestSha256=digest(JSON.stringify(request));
+  requireThat(policy && Array.isArray(policy.allowedHosts) && Number.isSafeInteger(policy.maxBytes) && policy.maxBytes>0 && policy.maxBytes<=LIMIT && Number.isSafeInteger(policy.timeoutMs) && policy.timeoutMs>0 && policy.timeoutMs<=120000 && Number.isInteger(policy.maxDownloads) && policy.maxDownloads>=0 && policy.maxDownloads<=100,'QWEN_RECOVERY_REVIEW_REQUIRED');
+  if(policy.proxy)validateDownloadProxy(policy.proxy);
+  const url=new URL(source.url),urlSha256=digest(url.href);
+  const approvedSource=automatic?source.schema==='qwen_media_source_v1' && approval?.automaticQueryId===source.queryId && approval?.operationId===source.operationId && approval?.nativeTaskId===source.task_id:approval?.requestSha256===requestSha256 && approval?.urlSha256===urlSha256;
+  requireThat(approval?.maxRequests===1 && Date.parse(approval.expiresAt)>Date.now() && approval.hostname===url.hostname && approvedSource,'QWEN_RECOVERY_REVIEW_REQUIRED');
+  requireThat(source.hostname===url.hostname && source.apiAuthenticationAllowedForDownload===false && id(source.taskId) && id(source.operationId) && safeId(source.task_id),'QWEN_RECOVERY_SOURCE_INVALID');
+  let sourceTrust,expectedSha256,expectedBytes;
+  if(source.schema==='qwen_media_source_v1') {
+   requireThat(source.taskId===this.#binding.taskId && source.bindingSha256===this.#config.bindingSha256 && source.origin===QWEN_ORIGIN && source.providerTaskStatus==='SUCCEEDED' && source.requestedModel===QWEN_MODELS.video && id(source.queryId) && source.urlSha256===urlSha256 && request.source.area==='work' && request.source.relativePath===`qwen-media/query-${source.queryId}/source-contract.json`,'QWEN_RECOVERY_SOURCE_INVALID');
+   const native=jsonFile(path.join(this.#base,`query-${source.queryId}`,'result.json'),32768),original=jsonFile(path.join(this.#base,`operation-${source.operationId}`,'result.json'),32768);
+   requireThat(native.status==='SUCCEEDED' && native.providerTaskSucceeded===true && native.task_id===source.task_id && native.sourceContract?.sha256===request.source.sha256 && original.kind==='video' && original.origin===QWEN_ORIGIN && original.task_id===source.task_id && original.status==='submitted','QWEN_RECOVERY_NATIVE_PROOF_REQUIRED');
+   sourceTrust='persisted-native-result';
+  }else {
+   const pin=policy.sourceImports?.find(item=>item.sha256===request.source.sha256);
+   requireThat(source.schema==='private_h3_native_source_v1' && request.source.area==='inputs' && pin && pin.taskId===source.taskId && pin.operationId===source.operationId && pin.task_id===source.task_id && pin.urlSha256===urlSha256 && pin.hostname===url.hostname && /^[a-f0-9]{64}$/.test(pin.expectedSha256) && Number.isSafeInteger(pin.expectedBytes) && pin.expectedBytes>0 && pin.expectedBytes<=policy.maxBytes,'QWEN_RECOVERY_IMPORT_REVIEW_REQUIRED');
+   sourceTrust='host-pinned-import';expectedSha256=pin.expectedSha256;expectedBytes=pin.expectedBytes;
+  }
+  const expiresAt=sourceExpiry(url);requireThat(!expiresAt || Date.parse(expiresAt)>Date.now(),'QWEN_RECOVERY_SOURCE_EXPIRED');
+  requireThat(source.schema!=='qwen_media_source_v1' || source.expiresAt===expiresAt,'QWEN_RECOVERY_SOURCE_INVALID');
+  const downloadSource={url:url.href,urlSha256,allowedHosts:policy.allowedHosts,...(expectedSha256?{mode:'pinned',sha256:expectedSha256,byteLength:expectedBytes}:{mode:'fresh',maxBytes:policy.maxBytes,maxRedirects:0})};
+  validateSourceUrl(downloadSource);const file=this.#target('outputs',request.outputName);
+  return {source,sourceTrust,downloadSource,file,policy,requestSha256,expiresAt};
+ }
+ recoveryPlan(request) {
+  const c=this.#recoveryContext(request);
+  return {schema:'qwen_media_recovery_plan_v1',taskId:this.#binding.taskId,recoveryId:request.recoveryId,requestSha256:c.requestSha256,sourceContract:request.source,sourceTrust:c.sourceTrust,originalTaskId:c.source.taskId,nativeTaskId:c.source.task_id,providerTaskStatus:'SUCCEEDED',hostname:c.source.hostname,urlSha256:c.downloadSource.urlSha256,expiresAt:c.expiresAt,linkExpiryKnown:c.expiresAt!==null,outputName:request.outputName,networkMode:c.policy.proxy?'loopback-connect':'direct',maxBytes:c.policy.maxBytes,timeoutMs:c.policy.timeoutMs,remainingBudgetNotVerified:c.policy.maxDownloads,maxRedirects:0,automaticRetry:false,authenticationCopied:false,credentialReads:0,platformRequests:0,generationRequests:0,networkRequests:0,downloadEnabled:c.policy.maxDownloads>0};
+ }
+ async recover(request) {return this.#recover(request);}
+ async #recover(request,automatic=false) {
+  const c=this.#recoveryContext(request,automatic);requireThat(c.policy.maxDownloads>=1,'QWEN_RECOVERY_BUDGET_EXCEEDED');
+  const dir=this.#reserve(`recovery-${request.recoveryId}`,{requestSha256:c.requestSha256,sourceSha256:request.source.sha256,task_id:c.source.task_id,atUtc:new Date().toISOString(),automaticRetry:false});
+  if(!dir)return {recoveryId:request.recoveryId,status:'reserved_or_finished',deduplicated:true,automaticRetry:false};
+  // 同一原生任务跨命令名、query签名URL和进程去重；意图永不自动释放。
+  const sourceKey=digest(canonical({origin:QWEN_ORIGIN,taskId:c.source.taskId,task_id:c.source.task_id,kind:'video'}));
+  if(!this.#reserve(`recovery-source-${sourceKey}`,{recoveryId:request.recoveryId,sourceSha256:request.source.sha256})) {
+   const receipt={recoveryId:request.recoveryId,status:'reserved_or_finished',deduplicated:true,automaticRetry:false};this.#save(path.join(dir,'result.json'),receipt);return receipt;
+  }
+  let slot=null;for(let n=1;n<=c.policy.maxDownloads;n++){slot=this.#reserve(`recovery-budget-${n}`,{recoveryId:request.recoveryId,sourceKey});if(slot)break;}requireThat(slot,'QWEN_RECOVERY_BUDGET_EXCEEDED');
+  let result={schema:'qwen_media_recovery_result_v1',recoveryId:request.recoveryId,originalTaskId:c.source.taskId,nativeTaskId:c.source.task_id,providerTaskStatus:'SUCCEEDED',sourceContract:request.source,sourceTrust:c.sourceTrust,status:'unknown',automaticRetry:false,credentialReads:0,platformRequests:0,generationRequests:0,authenticationCopied:false,modelExecutionVerified:false,technicalDecodeVerified:false,businessCompletedVerified:false};
+  try {
+   const downloaded=await downloadPinnedSource(c.downloadSource,c.file,{proxy:c.policy.proxy??null,timeoutMs:c.policy.timeoutMs,traceFile:path.join(dir,'download-trace.json')});this.verify();
+   const bytes=readOrdinary(c.file,c.policy.maxBytes);requireThat(bytes.length===downloaded.byteLength && digest(bytes)===downloaded.sha256 && downloaded.diskReadbackVerified===true,'QWEN_RECOVERY_DISK_MISMATCH');
+   requireThat(bytes.length>=8 && bytes.subarray(4,8).toString()==='ftyp','QWEN_VIDEO_TYPE_UNKNOWN');
+   result={...result,status:'succeeded',output:{relativePath:request.outputName,sha256:downloaded.sha256,byteLength:downloaded.byteLength},diskReadbackVerified:true,modelExecutionVerified:true};
+  }catch(failure){result.code=safeFailureCode(failure);result.downloadCode=typeof failure?.code==='string' && /^CONTENT_DOWNLOAD_[A-Z_]{1,70}$/.test(failure.code)?failure.code:null;result.partialFilePreserved=fs.existsSync(c.file);}
   this.#save(path.join(dir,'result.json'),result);return result;
  }
 }

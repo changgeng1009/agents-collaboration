@@ -40,13 +40,14 @@ test('离线前检为零网络；未授权生成与只读请求均被拒绝',asy
 test('仅固定maas媒体契约和原生Task GET；禁用models、直连厂商、重定向目的地',()=>{
  for(const url of ['https://dashscope.aliyuncs.com/api/v1/tasks/task','https://api.minimax.io/v1/video_generation','https://maas.qianwenaiapi.com/compatible-mode/v1/models','http://maas.qianwenaiapi.com/api/v1/tasks/task','https://maas.qianwenaiapi.com/api/v1/tasks/task?key=bad','https://user@maas.qianwenaiapi.com/api/v1/tasks/task'])assert.throws(()=>validateApiRequest({method:'GET',url}),{code:'QWEN_ENDPOINT_FORBIDDEN'});
 });
-test('H3提交与查询两步保留原始ID、同一端点；签名URL不写日志',async t=>{
+test('H3提交与查询两步保留原始ID、同一端点；签名URL只存私有来源合同',async t=>{
  const f=fixture(t),request=video('video-once');f.approve(request);const calls=[];
  const transport=async req=>{calls.push(req);return req.method==='POST'?{httpStatus:200,body:{request_id:'original-submit-id',output:{task_id:'original-native-task',task_status:'PENDING'}}}:{httpStatus:200,body:{request_id:'original-query-id',output:{task_id:'original-native-task',task_status:'SUCCEEDED',video_url:signed}}};};
  const adapter=new QwenMediaAdapter(f.config,{transport}),submitted=await adapter.execute(request);
  assert.equal(submitted.task_id,'original-native-task');assert.equal(submitted.request_id,'original-submit-id');assert.equal(calls[0].async,true);assert.equal(calls[0].body.model,QWEN_MODELS.video);
  const queried=await adapter.status(request.operationId,'query-once');assert.equal(queried.task_id,'original-native-task');assert.equal(queried.request_id,'original-query-id');assert.equal(queried.mediaRecoveryPending,true);assert.equal(queried.businessCompletedVerified,false);
- assert.equal(calls[1].url,QWEN_ORIGIN+'/api/v1/tasks/original-native-task');assert.ok(!f.readAll().includes('Signature='));assert.ok(!f.readAll().includes(secret));
+ assert.equal(calls[1].url,QWEN_ORIGIN+'/api/v1/tasks/original-native-task');assert.ok(!JSON.stringify(queried).includes('Signature='));assert.ok(!f.readAll().includes(secret));
+ const sourceFile=path.join(f.taskRoot,'work',queried.sourceContract.relativePath);assert.equal(hash(fs.readFileSync(sourceFile)),queried.sourceContract.sha256);assert.equal(JSON.parse(fs.readFileSync(sourceFile)).url,signed);
 });
 test('Speech按正式input voice/audio/output_format与output.data.audio解析hex',async t=>{
  const f=fixture(t),request=speech('speech-once');f.approve(request);let observed;
@@ -77,7 +78,7 @@ test('provider hostname回显凭据停止，原生trace保留，requestedModel�
  const f=fixture(t),v=video('secret-host');f.approve(v);let calls=0;
  const adapter=new QwenMediaAdapter(f.config,{transport:async()=>({httpStatus:200,body:{request_id:'native-original-request',output:++calls===1?{task_id:'native-original-task',task_status:'PENDING',trace_id:'native-submit-trace'}:{task_id:'native-original-task',task_status:'SUCCEEDED',trace_id:'native-query-trace',video_url:`https://${secret}.example.invalid/movie.mp4`}}})});
  const submitted=await adapter.execute(v);assert.equal(submitted.requestedModel,QWEN_MODELS.video);assert.equal(submitted.actualModelIdentity,null);assert.equal(submitted.trace_id,'native-submit-trace');
- const queried=await adapter.status(v.operationId,'secret-host-query');assert.equal(queried.status,'unknown');assert.equal(queried.code,'QWEN_RESPONSE_SECRET_REJECTED');assert.equal(queried.trace_id,'native-query-trace');assert.ok(!f.readAll().includes(secret));
+ const queried=await adapter.status(v.operationId,'secret-host-query');assert.equal(queried.status,'SUCCEEDED');assert.equal(queried.mediaRecovery.status,'blocked');assert.equal(queried.mediaRecovery.code,'QWEN_RESPONSE_SECRET_REJECTED');assert.equal(queried.sourceContract,undefined);assert.equal(queried.trace_id,'native-query-trace');assert.ok(!f.readAll().includes(secret));
 });
 test('上游明确回传另一型号则停止，保留脱敏原值与native ID，不写成品',async t=>{
  const f=fixture(t),s=speech('wrong-speech');f.approve(s);
