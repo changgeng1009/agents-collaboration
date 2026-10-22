@@ -177,3 +177,7 @@
 !/bridge/src/content-download-proxy.mjs
 !/tests/content-download-proxy.integration.mjs
 !/tests/qwen-media-recovery.integration.mjs
+!/bridge/src/content-transcript-timing.mjs
+!/tests/content-transcript-timing.integration.mjs
+!/bridge/src/workbuddy-localassistant-provider.mjs
+!/tests/workbuddy-localassistant-provider.integration.mjs

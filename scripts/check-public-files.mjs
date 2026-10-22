@@ -5,6 +5,10 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/workbuddy-localassistant-provider.mjs',
+  'tests/workbuddy-localassistant-provider.integration.mjs',
+  'bridge/src/content-transcript-timing.mjs',
+  'tests/content-transcript-timing.integration.mjs',
   'bridge/src/content-download-proxy.mjs',
   'tests/content-download-proxy.integration.mjs',
   'tests/qwen-media-recovery.integration.mjs',
