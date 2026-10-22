@@ -10,6 +10,7 @@ import { parseCollaborationArgs, collaborationToolNames } from './collaboration-
 import { CollaborationInbox } from './collaboration-inbox.mjs';
 import { CollaborationMedia, MEDIA_TOOLS } from './collaboration-media.mjs';
 import {CollaborationContent,CONTENT_TOOLS} from './collaboration-content.mjs';
+import {CoreQwenMedia,CORE_QWEN_TOOLS} from './core-qwen-media.mjs';
 import {reviewPreparedWorkspaces,verifyPreparedWorkspace,copyPreparedBrief,safeLocalDirectoryName} from './collaboration-workspaces.mjs';
 
 export const COLLABORATION_RUNTIME_ROOT=path.join(RUNTIME_ROOT,'collaboration-core');
@@ -22,7 +23,7 @@ const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 
 export class CollaborationStore{
  #issued=new WeakSet();
- constructor({dbPath,runtimeNamespace=null,preparedWorkspaces=[],executionProvider=null,fileWorker=null,contentMediaTools=null,allowPausedFixtures=false}={}){
+ constructor({dbPath,runtimeNamespace=null,preparedWorkspaces=[],executionProvider=null,fileWorker=null,contentMediaTools=null,allowPausedFixtures=false,coreMedia=null,coreMediaTestHooks={}}={}){
   if(runtimeNamespace!==null&&!safeLocalDirectoryName(runtimeNamespace))fail('RUNTIME_NAMESPACE_INVALID','独立运行命名空间必须是可信启动指定的安全标识。');
   this.runtimeRoot=runtimeNamespace===null?COLLABORATION_RUNTIME_ROOT:path.join(COLLABORATION_RUNTIME_ROOT,runtimeNamespace);this.preparedWorkspaces=reviewPreparedWorkspaces(preparedWorkspaces);
   this.fileWorker=fileWorker;
@@ -43,6 +44,7 @@ export class CollaborationStore{
   this.inbox=new CollaborationInbox(this);
   this.media=new CollaborationMedia(this);
   this.content=new CollaborationContent(this);
+  this.coreMedia=new CoreQwenMedia(this,coreMedia,coreMediaTestHooks);
  }
  fileIdentity(file){const stat=fs.lstatSync(sessionPath(file),{bigint:true});if(!stat.isFile()||stat.nlink!==1n)fail('DATABASE_IDENTITY','协作数据文件必须是单链接普通文件。');return{dev:String(stat.dev),ino:String(stat.ino),birthtimeNs:String(stat.birthtimeNs)};}
  checkDb(){for(const suffix of['','-wal','-shm','-journal']){const file=sessionPath(this.dbPath+suffix,false);if(fs.existsSync(file)){const identity=this.fileIdentity(file);if(suffix===''&&this.databaseIdentity&&!same(identity,this.databaseIdentity))fail('DATABASE_IDENTITY','数据库路径已被替换。');}else if(suffix===''&&this.databaseIdentity)fail('DATABASE_IDENTITY','数据库路径已丢失。');}}
@@ -108,7 +110,8 @@ export class CollaborationStore{
   if(args.artifactId)this.artifact(identity,args.groupId,args.artifactId);
  }
  async invoke(identity,name,input,context={}){
-  const args=parseCollaborationArgs(identity.kind,name,input);this.authorize(identity,name,args);
+  const args=parseCollaborationArgs(identity.kind,name,input,identity);this.authorize(identity,name,args);
+  if(CORE_QWEN_TOOLS.includes(name))return this.coreMedia.invoke(identity,name,args);
   if(MEDIA_TOOLS.includes(name))return this.media.invoke(identity,name,args);
   if(CONTENT_TOOLS.includes(name))return this.content.invoke(identity,name,args);
   if(['open_inbox','wait_for_messages','get_inbox','close_inbox'].includes(name))return this.inbox.invoke(identity,name,args,context);
@@ -130,7 +133,7 @@ export class CollaborationStore{
  }
  handle(identity,name,args){
   const self=identity.instanceId;
-  if(name==='get_capabilities')return{version:'0.2.19',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind),executionRoutes:platformRoutes(identity.platform,identity.mode),fileWorkerBoundary:{implemented:true,configured:this.fileWorker!==null,verification:'per_operation_only',unconfiguredMode:'bridge_only',configuredFailureFallback:false,platformOsIsolationVerified:false},managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
+  if(name==='get_capabilities')return{version:'0.2.20',channel:'independent-collaboration',identity:{kind:identity.kind,instanceId:self,platform:identity.platform,mode:identity.mode,identityEvidence:'registered',platformVerified:false},tools:collaborationToolNames(identity.kind,identity),executionRoutes:platformRoutes(identity.platform,identity.mode),fileWorkerBoundary:{implemented:true,configured:this.fileWorker!==null,verification:'per_operation_only',unconfiguredMode:'bridge_only',configuredFailureFallback:false,platformOsIsolationVerified:false},managerRole:'group_scoped_transferable',requiresCodexRuntime:false,activeInboxWaitSupported:true,activeClientWaitVerified:false,maxInboxWaitMs:20000,maxInboxDurationSeconds:600,maxInboxMessages:32,maxInboxWaits:30,maxInboxGroupsPerMember:4,passivePlatformWakeSupported:false,automaticMemberMessages:false,platformIdentityVerified:false,platformWorkingDirectoryVerified:false,modelToolBoundaryVerified:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false,passiveWakeVerified:false,businessCompletedVerified:false};
   if(name==='list_members')return{members:identity.kind==='service_admin'?this.list('member').filter(member=>member.kind==='member'):this.memberIds(this.group(identity,args.groupId)).map(id=>this.member(id))};
   if(name==='provision_member'){const result=this.provisionMember(args);this.event(identity,name,null,{instanceId:args.instanceId});return result;}
   if(name==='revoke_member'){const target=this.member(args.instanceId);this.db.prepare('UPDATE core_credentials SET active=0 WHERE instance_id=?').run(target.instanceId);target.status='revoked';this.put('member',target.instanceId,target);for(const group of this.list('group'))if(group.members[target.instanceId]?.state==='active'){group.members[target.instanceId].state='revoked';if(group.managerId===target.instanceId){group.managerId=null;this.event(identity,'manager_vacated_by_explicit_revoke',group.groupId,{previousManagerId:target.instanceId,origin:'service_admin_revocation'});}this.put('group',group.groupId,group);}this.event(identity,name,null,{instanceId:target.instanceId});return{instanceId:target.instanceId,status:'revoked'};}
@@ -162,7 +165,7 @@ export class CollaborationStore{
   if(name==='publish_artifact'||name==='submit_task_result')return this.publishArtifact(identity,args,name==='submit_task_result');
   if(name==='get_artifact'){const artifact=this.artifact(identity,args.groupId,args.artifactId);this.markRead(identity,'artifact',artifact.artifactId,args.groupId);return{artifact};}
   if(name==='review_artifact'){const artifact=this.artifact(identity,args.groupId,args.artifactId);if(!this.db.prepare('SELECT 1 FROM core_reads WHERE actor=? AND kind=? AND record_id=?').get(self,'artifact',artifact.artifactId))fail('SOURCE_NOT_READ','评审前必须实际读取成果。');if(artifact.reviews[self])fail('REVIEW_ALREADY_RECORDED','每位成员只登记一次独立评审，修改应创建新成果。');coreText(args.text,4096,true);artifact.reviews[self]={authorId:self,verdict:args.verdict,text:args.text,at:now(),evidence:'member_submitted'};this.put('artifact',artifact.artifactId,artifact);this.event(identity,name,args.groupId,{artifactId:artifact.artifactId});return{artifact};}
-  if(name==='read_task_file'){const task=this.task(identity,args.groupId,args.taskId);if(!task.workspace||!task.scope)fail('WORKSPACE_NOT_READY','任务目录尚未就绪或创建结果未知。');const result=operateTaskFile(this,task,'read',{area:args.area,relativePath:args.relativePath});this.authorize(identity,name,args);return{...result,groupId:args.groupId,taskId:args.taskId,scope:this.fileWorker?'os_worker_with_trusted_broker':'bridge_only'};}
+  if(name==='read_task_file'){const task=this.task(identity,args.groupId,args.taskId);if(!task.workspace||!task.scope)fail('WORKSPACE_NOT_READY','任务目录尚未就绪或创建结果未知。');const result=operateTaskFile(this,task,'read',{area:args.area,relativePath:args.relativePath});this.authorize(identity,name,args);if(args.area==='inputs')this.markRead(identity,'task_input',`${args.groupId}:${args.taskId}:${args.relativePath}:${result.sha256}`,args.groupId);return{...result,groupId:args.groupId,taskId:args.taskId,scope:this.fileWorker?'os_worker_with_trusted_broker':'bridge_only'};}
   if(name==='write_task_file')return this.writeTaskFile(identity,args);
   if(name==='register_native_session')return this.registerNative(identity,args);
   if(name==='get_native_session'){const native=this.get('native',`${args.groupId}:${args.taskId}:${self}`,false);if(!native)fail('NATIVE_NOT_FOUND','当前实例未登记该任务的原生来源。');return{native};}

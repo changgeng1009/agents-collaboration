@@ -5,6 +5,11 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/core-qwen-media.mjs',
+  'bridge/src/core-qwen-worker.mjs',
+  'tests/core-qwen-media.integration.mjs',
+  'bridge/scripts/core-qwen-host-plan.mjs',
+  'tests/core-qwen-config.integration.mjs',
   'bridge/src/workbuddy-localassistant-provider.mjs',
   'tests/workbuddy-localassistant-provider.integration.mjs',
   'bridge/src/content-transcript-timing.mjs',

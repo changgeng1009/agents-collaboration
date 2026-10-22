@@ -117,29 +117,41 @@ export async function nativeQwenTransport(request) {
  });
 }
 
+// 无HTTP副作用的受控路由前检。代理为显式可信配置；不自动切换网络。
+export async function qwenNetworkPreflight({hostname=new URL(QWEN_ORIGIN).hostname,proxy=null,download=false}={}, {lookup=dns.lookup}={}) {
+ if(proxy){if(download)validateDownloadProxy(proxy);else validateLoopbackProxy(proxy);return{mode:'loopback-connect',proxyConfigurationValidated:true,connectionVerified:false,httpRequests:0};}
+ let timer;try{const rows=await Promise.race([lookup(hostname,{all:true,family:4,verbatim:true}),new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(error('QWEN_DNS_TIMEOUT')),10000);})]);requireThat(rows.length>0&&rows.every(r=>isPublicIPv4(r.address)),'QWEN_DNS_FORBIDDEN');return{mode:'direct',publicDnsVerified:true,httpRequests:0};}catch(e){throw error(e.code?.startsWith('QWEN_')?e.code:'QWEN_NETWORK_UNKNOWN');}finally{clearTimeout(timer);}
+}
+
 export class QwenMediaAdapter {
- #config; #transport; #binding; #base;
- constructor(config,{transport=nativeQwenTransport}={}) {
+ #config; #transport; #binding; #base; #coreVerifier; #download;
+ constructor(config,{transport=nativeQwenTransport,verifyCoreBinding=null,download=downloadPinnedSource}={}) {
   this.#config=structuredClone(config);this.#transport=transport;
+  this.#coreVerifier=verifyCoreBinding;this.#download=download;
   requireThat(config.schema==='qwen_media_host_v1' && config.origin===QWEN_ORIGIN && config.models?.video===QWEN_MODELS.video && config.models?.speech===QWEN_MODELS.speech,'QWEN_CONFIG_INVALID');
   if(config.network?.proxy)validateLoopbackProxy(config.network.proxy);
   this.#binding=jsonFile(config.bindingFile,32768);
   requireThat(digest(readOrdinary(config.bindingFile,32768))===config.bindingSha256,'QWEN_BINDING_CHANGED');
-  this.verify();this.#base=path.join(this.#binding.taskRoot,'work','qwen-media');
+  this.verify();this.#base=path.join(this.#binding.schema==='qwen_media_task_binding_v2'?this.#binding.privateWork:this.#binding.taskRoot+'/work','qwen-media');
   ordinaryPath(this.#base,false);fs.mkdirSync(this.#base,{recursive:true});this.verify();
  }
  verify() {
   const b=this.#binding;
-  requireThat(b.schema==='qwen_media_task_binding_v1' && id(b.taskId) && b.taskRoot===path.join(b.projectRoot,'task-workspaces',b.taskId),'QWEN_BINDING_INVALID');
+  if(b.schema==='qwen_media_task_binding_v2') {
+   requireThat(typeof this.#coreVerifier==='function' && id(b.taskId),'QWEN_CORE_BINDING_REQUIRED');
+   const verified=this.#coreVerifier(structuredClone(b));
+   requireThat(verified===true,'QWEN_CORE_BINDING_REQUIRED');
+  }else requireThat(b.schema==='qwen_media_task_binding_v1' && id(b.taskId) && b.taskRoot===path.join(b.projectRoot,'task-workspaces',b.taskId),'QWEN_BINDING_INVALID');
   ordinaryPath(b.projectRoot);ordinaryPath(b.taskRoot);
   let osWorkerReserved=false;try{fs.lstatSync(path.join(b.taskRoot,'.os-worker'));osWorkerReserved=true;}catch(failure){if(failure.code!=='ENOENT')throw failure;}
   requireThat(!osWorkerReserved,'QWEN_OS_BACKEND_REQUIRED');
   requireThat(digest(readOrdinary(this.#config.bindingFile,32768))===this.#config.bindingSha256,'QWEN_BINDING_CHANGED');
-  for(const area of ['inputs','work','outputs']) requireThat(JSON.stringify(directoryIdentity(path.join(b.taskRoot,area)))===JSON.stringify(b.directories[area]),'QWEN_BINDING_CHANGED');
+  for(const area of ['inputs','work','outputs']) requireThat(JSON.stringify(directoryIdentity(this.#area(area)))===JSON.stringify(b.directories[area]),'QWEN_BINDING_CHANGED');
  }
+ #area(area) {return this.#binding.schema==='qwen_media_task_binding_v2'?this.#binding.directories[area].path:path.join(this.#binding.taskRoot,area);}
  #target(area,name) {
   this.verify();requireThat(['inputs','work','outputs'].includes(area) && typeof name==='string' && !path.isAbsolute(name) && !name.split(/[\\/]/).some(part=>!part || part==='.' || part==='..'),'QWEN_PATH_INVALID');
-  const root=path.join(this.#binding.taskRoot,area),file=path.resolve(root,name);
+  const root=this.#area(area),file=path.resolve(root,name);
   requireThat(inside(root,file) && file!==root,'QWEN_PATH_INVALID');return ordinaryPath(file,false);
  }
  #save(file,value) {this.verify();requireThat(inside(this.#base,file),'QWEN_PATH_INVALID');return writeJson(file,value);}
@@ -183,6 +195,10 @@ export class QwenMediaAdapter {
   return {model:QWEN_MODELS[kind],input:{...input.input,...(kind==='speech'?input.parameters:{})},...(kind==='video'?{parameters:input.parameters}:{})};
  }
  readRequest(relativePath) {return jsonFile(this.#target('inputs',relativePath),1048576);}
+ planRequest(request) {
+  this.verify();const body=this.#request(request.kind,request);
+  return {operationId:request.operationId,kind:request.kind,body,model:body.model,requestSha256:digest(JSON.stringify(request)),bodySha256:digest(canonical(body)),endpoint:QWEN_ORIGIN+POST_PATHS[request.kind],units:request.kind==='video'?request.parameters.duration:[...request.input.text].reduce((n,c)=>n+(/\p{Unified_Ideograph}/u.test(c)?2:1),0)};
+ }
  preflight(request=null) {
   this.verify();const credentials={};for(const kind of ['video','speech']) {try{this.#token(kind);credentials[kind]={readable:true,formatValid:true,authenticationVerified:false};}catch(failure){credentials[kind]={readable:false,formatValid:false,code:safeFailureCode(failure)};}}
   let plan=null;if(request){const body=this.#request(request.kind,request);plan={operationId:request.operationId,kind:request.kind,model:body.model,requestSha256:digest(JSON.stringify(request)),endpoint:QWEN_ORIGIN+POST_PATHS[request.kind],units:request.kind==='video'?request.parameters.duration:[...request.input.text].length};}
@@ -270,7 +286,7 @@ export class QwenMediaAdapter {
      const source={schema:'qwen_media_source_v1',taskId:this.#binding.taskId,bindingSha256:this.#config.bindingSha256,origin:QWEN_ORIGIN,operationId,queryId,task_id:original.task_id,providerTaskStatus:'SUCCEEDED',requestedModel:QWEN_MODELS.video,actualModelIdentity:result.actualModelIdentity,request_id:result.request_id,url:url.href,urlSha256:digest(url.href),hostname:url.hostname,expiresAt:sourceExpiry(url),apiAuthenticationAllowedForDownload:false,atUtc:new Date().toISOString()};
      const sourceFile=path.join(dir,'source-contract.json'),pin=this.#save(sourceFile,source);
      result.mediaHost=this.#config.recovery?.allowedHosts?.includes(url.hostname)?url.hostname:null;
-     result.sourceContract={area:'work',relativePath:path.relative(path.join(this.#binding.taskRoot,'work'),sourceFile).split(path.sep).join('/'),sha256:pin.sha256};
+     result.sourceContract={area:'work',relativePath:path.relative(this.#area('work'),sourceFile).split(path.sep).join('/'),sha256:pin.sha256};
     }catch(failure){result.mediaRecovery={status:'blocked',code:safeFailureCode(failure),automaticRetry:false};}
    }
   }catch(failure){result.status='unknown';result.code=safeFailureCode(failure);}
@@ -332,7 +348,7 @@ export class QwenMediaAdapter {
   let slot=null;for(let n=1;n<=c.policy.maxDownloads;n++){slot=this.#reserve(`recovery-budget-${n}`,{recoveryId:request.recoveryId,sourceKey});if(slot)break;}requireThat(slot,'QWEN_RECOVERY_BUDGET_EXCEEDED');
   let result={schema:'qwen_media_recovery_result_v1',recoveryId:request.recoveryId,originalTaskId:c.source.taskId,nativeTaskId:c.source.task_id,providerTaskStatus:'SUCCEEDED',sourceContract:request.source,sourceTrust:c.sourceTrust,status:'unknown',automaticRetry:false,credentialReads:0,platformRequests:0,generationRequests:0,authenticationCopied:false,modelExecutionVerified:false,technicalDecodeVerified:false,businessCompletedVerified:false};
   try {
-   const downloaded=await downloadPinnedSource(c.downloadSource,c.file,{proxy:c.policy.proxy??null,timeoutMs:c.policy.timeoutMs,traceFile:path.join(dir,'download-trace.json')});this.verify();
+   const downloaded=await this.#download(c.downloadSource,c.file,{proxy:c.policy.proxy??null,timeoutMs:c.policy.timeoutMs,traceFile:path.join(dir,'download-trace.json')});this.verify();
    const bytes=readOrdinary(c.file,c.policy.maxBytes);requireThat(bytes.length===downloaded.byteLength && digest(bytes)===downloaded.sha256 && downloaded.diskReadbackVerified===true,'QWEN_RECOVERY_DISK_MISMATCH');
    requireThat(bytes.length>=8 && bytes.subarray(4,8).toString()==='ftyp','QWEN_VIDEO_TYPE_UNKNOWN');
    result={...result,status:'succeeded',output:{relativePath:request.outputName,sha256:downloaded.sha256,byteLength:downloaded.byteLength},diskReadbackVerified:true,modelExecutionVerified:true};

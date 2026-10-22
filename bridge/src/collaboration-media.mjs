@@ -51,7 +51,10 @@ function inspectMedia(store,task,relativePath,options,contentType='video'){retur
  while(offset<Number(stat.size)){const count=fs.readSync(fd,buffer,0,Math.min(buffer.length,Number(stat.size)-offset),offset);if(!count)fail('MEDIA_FILE_CHANGED','视频读取未完成。');if(offset===0)buffer.copy(header,0,0,header.length);hash.update(buffer.subarray(0,count));offset+=count;}
  let mimeType;
  if(contentType==='video')mimeType=mimeOf(header,relativePath);
- else if(contentType==='audio'){
+ else if(contentType==='mp3'){
+  if(path.extname(relativePath).toLowerCase()!=='.mp3'||!(header.subarray(0,3).toString('ascii')==='ID3'||header[0]===255&&(header[1]&224)===224))fail('CONTENT_AUDIO_FORMAT_INVALID','原生音频须有MP3签名与匹配扩展名；签名不证明解码或听感。');
+  mimeType='audio/mpeg';
+ }else if(contentType==='audio'){
   if(path.extname(relativePath).toLowerCase()!=='.wav'||header.toString('ascii',0,4)!=='RIFF'||header.toString('ascii',8,12)!=='WAVE')fail('CONTENT_AUDIO_FORMAT_INVALID','本地配音版本须有WAV容器签名。');
   mimeType='audio/wav';
  }else{
@@ -62,6 +65,7 @@ function inspectMedia(store,task,relativePath,options,contentType='video'){retur
  }
  return{relativePath,area:'outputs',byteLength:offset,sha256:hash.digest('hex'),mimeType,fileIdentity:identityOf(stat),containerSignatureVerified:true,wholeFileHashVerifiedAtRegistration:true,playabilityVerified:false,fullVideoViewed:false,fileWorkerOsIsolationVerified:false,platformOsIsolationVerified:false};
 },options);}
+export function inspectCoreMediaOutput(store,task,relativePath,kind){return inspectMedia(store,task,relativePath,{archive:true},kind==='speech'?'mp3':'video');}
 export class CollaborationMedia{
  constructor(store){this.store=store;}
  inspectContentOutput(identity,args,{write=true}={}){
@@ -100,6 +104,7 @@ export class CollaborationMedia{
   if(name==='reserve_media_generation'){
    const task=this.task(identity,args,{write:true}),group=store.group(identity,args.groupId);if(task.assigneeId!==self&&group.managerId!==self)fail('GENERATION_OPERATOR_REQUIRED','仅负责人或有文件权限的组manager可登记生成意图。');
    if(store.list('media_generation').some(item=>item.groupId===args.groupId&&item.taskId===args.taskId))fail('GENERATION_ALREADY_RESERVED','该任务已有生成意图，失败或unknown也不换号重新提交。');
+   if(store.list('core_qwen_reservation').some(item=>item.groupId===args.groupId&&item.taskId===args.taskId))fail('GENERATION_ALREADY_RESERVED','该任务已有独立媒体worker意图，不能由旧通道接管。');
    if(store.list('external_media_archive').some(item=>item.groupId===args.groupId&&item.taskId===args.taskId))fail('MEDIA_ARCHIVE_EXISTS','该任务已有既有视频归档，不能再创建生成意图。');
    const generation={generationId:randomUUID(),groupId:args.groupId,taskId:args.taskId,workspaceBinding:task.workspace.markerSha256,requestedBy:self,producerId:task.assigneeId,assignmentRevision:task.assignmentRevision,requestedProvider:args.provider,requestedModel:args.model,status:'reserved',providerGenerationId:null,providerGenerationFieldName:null,actualSkillIdentity:null,actualModelIdentity:null,createdAt:now(),events:[],generationSubmittedVerified:false,modelExecutionVerified:false,businessCompletedVerified:false,automaticRetry:false,evidence:'intent_only'};
    store.put('media_generation',generation.generationId,generation);store.event(identity,name,args.groupId,{taskId:args.taskId,generationId:generation.generationId});return{generation};
@@ -126,6 +131,7 @@ export class CollaborationMedia{
    const{task,source,result}=this.archiveSource(identity,args);
    // 与reserve共用BEGIN IMMEDIATE事务；任意生成状态均优先阻断，不能用归档绕过unknown。
    if(store.list('media_generation').some(item=>item.groupId===args.groupId&&item.taskId===args.taskId))fail('ARCHIVE_GENERATION_EXISTS','该任务已有生成意图，不能另走既有视频归档。');
+   if(store.list('core_qwen_reservation').some(item=>item.groupId===args.groupId&&item.taskId===args.taskId))fail('ARCHIVE_GENERATION_EXISTS','该任务已有独立媒体意图，不能用归档覆盖原状态。');
    const archives=store.list('external_media_archive');
    if(archives.some(item=>item.sourceArtifactId===source.artifactId))fail('MEDIA_ALREADY_ARCHIVED','该原结果已有独立归档，不重复登记或改用派生副本。');
    const media=inspectMedia(store,task,args.relativePath,{archive:true}),sameTask=item=>item.groupId===args.groupId&&item.taskId===args.taskId;
@@ -135,7 +141,7 @@ export class CollaborationMedia{
    store.put('external_media_archive',archiveId,artifact);store.put('artifact',artifact.artifactId,artifact);store.markRead(identity,'artifact',artifact.artifactId,args.groupId);store.event(identity,name,args.groupId,{taskId:args.taskId,archiveId,artifactId:artifact.artifactId,sourceArtifactId:source.artifactId,producerId:source.authorId,sha256:media.sha256,byteLength:media.byteLength});return{artifact};
   }
   if(name==='get_task_media'||name==='read_task_media_chunk'){
-   const task=this.task(identity,args),artifact=store.artifact(identity,args.groupId,args.artifactId);if(!['binary_media','external_media_archive'].includes(artifact.kind)||artifact.taskId!==args.taskId||artifact.workspaceBinding!==task.workspace.markerSha256)fail('MEDIA_BINDING_MISMATCH','视频成果必须属于本组、本任务和原目录。');
+   const task=this.task(identity,args),artifact=store.artifact(identity,args.groupId,args.artifactId);if(!['binary_media','external_media_archive','core_qwen_media'].includes(artifact.kind)||artifact.taskId!==args.taskId||artifact.workspaceBinding!==task.workspace.markerSha256)fail('MEDIA_BINDING_MISMATCH','媒体成果必须属于本组、本任务和原目录。');
    if(name==='get_task_media'){store.markRead(identity,'artifact',artifact.artifactId,args.groupId);return{artifact,metadataOnly:true,fullVideoViewed:false};}
    if(args.offset>artifact.byteLength)fail('MEDIA_RANGE_INVALID','分块偏移超出登记视频范围。');
    const chunk=withMediaFile(store,task,artifact.relativePath,artifact.fileIdentity,fd=>{const bytes=Buffer.alloc(Math.min(args.length,artifact.byteLength-args.offset));let offset=0;while(offset<bytes.length){const read=fs.readSync(fd,bytes,offset,bytes.length-offset,args.offset+offset);if(!read)fail('MEDIA_FILE_CHANGED','视频分块读取未完成。');offset+=read;}return bytes;},{archive:artifact.kind==='external_media_archive'});

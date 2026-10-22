@@ -9,7 +9,7 @@ import { PROJECT_ROOT, SOURCE_ROOT, guardedPath, fail, sha256 } from './policy.m
 import { CollaborationStore } from './collaboration-store.mjs';
 import { createCollaborationMcp } from './collaboration-tools.mjs';
 
-export const COLLAB_SERVICE_VERSION = '0.2.19';
+export const COLLAB_SERVICE_VERSION = '0.2.20';
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
 const bodyLimit = 256 * 1024;
 const stamp = () => new Date().toISOString();
@@ -67,7 +67,7 @@ function rpcMetadata(body) {
 }
 
 // 一个独立 HTTP 进程服务任意已登记实例；身份只由本次真实凭据解析，不取消息参数。
-export async function startCollaborationService({ port = 18764, dbPath, runtimeNamespace = null, preparedWorkspaces = [], fileWorker = null, contentMediaTools = null, reviewedCodeBuddyProvider = false } = {}) {
+export async function startCollaborationService({ port = 18764, dbPath, runtimeNamespace = null, preparedWorkspaces = [], fileWorker = null, contentMediaTools = null, reviewedCodeBuddyProvider = false, coreMedia = null, coreMediaTestHooks = {} } = {}) {
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535 || [18761, 18762, 18763].includes(port) ||
       (port === 0 && !(process.env.COLLAB_TEST_MODE === '1' && PROJECT_ROOT !== SOURCE_ROOT))) fail('SERVICE_PORT_INVALID', '独立协作服务必须使用独立端口；随机端口只允许隔离测试。');
   if (typeof reviewedCodeBuddyProvider !== 'boolean') fail('SERVICE_PROVIDER_INVALID', '执行模式只能由可信启动显式选择。');
@@ -76,7 +76,7 @@ export async function startCollaborationService({ port = 18764, dbPath, runtimeN
     const { CodeBuddyCollaborationProvider } = await import('./collaboration-provider.mjs');
     executionProvider = new CodeBuddyCollaborationProvider();
   }
-  const store = new CollaborationStore({ ...(dbPath ? { dbPath } : {}), runtimeNamespace, preparedWorkspaces, executionProvider, fileWorker, contentMediaTools });
+  const store = new CollaborationStore({ ...(dbPath ? { dbPath } : {}), runtimeNamespace, preparedWorkspaces, executionProvider, fileWorker, contentMediaTools, coreMedia, coreMediaTestHooks });
   let admin, audit;
   try { admin = store.bootstrapAdmin(); audit = auditWriter(randomUUID()); }
   catch (error) { store.close(); throw error; }

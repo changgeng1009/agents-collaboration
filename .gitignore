@@ -181,3 +181,8 @@
 !/tests/content-transcript-timing.integration.mjs
 !/bridge/src/workbuddy-localassistant-provider.mjs
 !/tests/workbuddy-localassistant-provider.integration.mjs
+!/bridge/src/core-qwen-media.mjs
+!/bridge/src/core-qwen-worker.mjs
+!/tests/core-qwen-media.integration.mjs
+!/bridge/scripts/core-qwen-host-plan.mjs
+!/tests/core-qwen-config.integration.mjs

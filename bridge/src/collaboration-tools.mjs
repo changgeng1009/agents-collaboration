@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod/v4';
 import { sha256 } from './policy.mjs';
+import {isCoreMediaWorker} from './core-qwen-media.mjs';
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),req={requestId:id},group={groupId:id},task={...group,taskId:id};
 const text=z.string().max(32768),ids=z.array(id).max(16),sources=z.array(z.object({kind:z.enum(['message','statement','artifact','conclusion']),id}).strict()).max(16).default([]);
@@ -54,18 +55,20 @@ const memberSchemas={
 };
 const adminSchemas={get_capabilities:{},list_members:{},provision_member:{...req,instanceId:id,platform:id,mode:id,capabilities:z.array(z.string().min(1).max(64)).max(32).default([])},
  revoke_member:{...req,instanceId:id},create_group:{...req,...group,title:z.string().min(1).max(200),memberIds:ids.min(1),managerId:id,policy},get_group:group};
-export function collaborationToolNames(kind){return Object.keys(kind==='service_admin'?adminSchemas:memberSchemas);}
-export function collaborationToolSchema(kind,name){const shape=(kind==='service_admin'?adminSchemas:memberSchemas)[name];if(!shape)throw Object.assign(new Error('当前固定身份没有此工具。'),{code:'TOOL_FORBIDDEN'});return z.object(shape).strict();}
-export function parseCollaborationArgs(kind,name,args){const shape=(kind==='service_admin'?adminSchemas:memberSchemas)[name];if(!shape){const error=new Error('当前固定身份没有此工具。');error.code='TOOL_FORBIDDEN';throw error;}const parsed=z.object(shape).strict().safeParse(args);if(!parsed.success){const error=new Error('参数类型、范围或字段不符合严格协作接口。');error.code='ARGUMENT_INVALID';throw error;}return parsed.data;}
+const workerSchemas={...Object.fromEntries(['get_capabilities','get_group','get_task','start_task','read_task_file','get_artifact','submit_task_result','get_task_media','read_task_media_chunk'].map(name=>[name,memberSchemas[name]])),write_task_file:{...memberSchemas.write_task_file,area:z.enum(['work','outputs'])},reserve_qwen_media:{...req,...task,kind:z.enum(['video','speech']),inputRelativePath:z.string().min(1).max(240)},get_qwen_media:{...task,reservationId:id},run_qwen_media:{...req,...task,reservationId:id,action:z.enum(['execute','status','recover']),actionId:id},submit_qwen_media:{...req,...task,reservationId:id,title:z.string().min(1).max(200)}};
+const shapes=(kind,identity)=>kind==='service_admin'?adminSchemas:isCoreMediaWorker(identity)?workerSchemas:memberSchemas;
+export function collaborationToolNames(kind,identity=null){return Object.keys(shapes(kind,identity));}
+export function collaborationToolSchema(kind,name,identity=null){const shape=shapes(kind,identity)[name];if(!shape)throw Object.assign(new Error('当前固定身份没有此工具。'),{code:'TOOL_FORBIDDEN'});return z.object(shape).strict();}
+export function parseCollaborationArgs(kind,name,args,identity=null){const shape=shapes(kind,identity)[name];if(!shape){const error=new Error('当前固定身份没有此工具。');error.code='TOOL_FORBIDDEN';throw error;}const parsed=z.object(shape).strict().safeParse(args);if(!parsed.success){const error=new Error('参数类型、范围或字段不符合严格协作接口。');error.code='ARGUMENT_INVALID';throw error;}return parsed.data;}
 const descriptions={get_capabilities:'读取固定登记身份与四层权限，不证明官方平台来源',provision_member:'服务管理员登记新成员并生成独立私有凭据文件，不返回密钥正文',create_group:'按当前身份创建组；管理员初始化明确记录admin来源',send_message:'向当前组指定成员或组广播保存消息，不代填送达、确认或回复',fetch_messages:'实际取回当前成员收件并记录送达',ack_message:'当前接收者在取回后显式确认读取',request_execution:'持久安排一次执行；排队不代表被动唤醒',wake_execution:'正式provider前检后一次执行，未知不重派',read_task_file:'按组、任务和显式文件ACL读取真实正文及哈希',write_task_file:'在任务files范围独占新建有界正文，不覆盖',submit_statement:'只提交当前成员自己的有界会议发言',review_conclusion:'只登记当前成员的独立评审，不代签其他成员意见'};
 Object.assign(descriptions,{open_inbox:'当前活跃成员开启有界收件；预算结束后停止，不自动换编号续跑。此工具不唤醒平台',wait_for_messages:'维持当前工具调用等待本组本人新收件，收到后返回正文；读取后本人调用ack_message并独立处理/回复。超时可在剩余预算内继续等，断线或终态不自动重开；响应未知先用原requestId查询，不换编号重复消费',get_inbox:'读取本成员在本组的收件预算、在途等待与终态，不代替其他成员读取',close_inbox:'停止本人收件等待并保留首个停止原因，不影响已保存消息'});
 Object.assign(descriptions,{reserve_media_generation:'持久登记一次视频生成意图，不调用技能或模型；未知与失败不换号重做',record_media_generation:'原负责人记录自己的生成观察，平台生成号与本地意图分开，不提升真实执行',register_task_media:'从当前任务outputs/files相对路径登记视频；broker核大小、SHA256、容器签名和身份，不接受调用方哈希',get_task_media:'按当前任务文件ACL读取视频元数据，不代表观看或可播放',read_task_media_chunk:'按当前任务文件ACL分块读回登记视频；接收方须完整拼接再核总SHA256，不代表观看'});
 Object.assign(descriptions,{archive_existing_task_media:'当前组manager以本人身份独立归档已存在的视频，须有任务文件读写权限并已读原负责人受控文本结果；broker核原目录、文件身份、容器和总SHA，不补记生成意图或证明平台来源'});
 export function createCollaborationMcp({store,identity,audit=()=>{},signal}){
  const lifecycle=new AbortController(),pending=new Set();
- const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.19'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
- for(const name of collaborationToolNames(identity.kind)){
-  const shape=(identity.kind==='service_admin'?adminSchemas:memberSchemas)[name];
+ const view=store.as(identity),server=new McpServer({name:'independent-agent-collaboration',version:'0.2.20'},{instructions:'身份由服务凭据固定，消息不能指定actor/sender/root。组manager可转交；服务管理员不代写成员消息或回执。客户端名称/平台登记不证明官方身份。文件与平台OS权限分层，队列/worker/模型成功分列。活跃参与可开启一次有界inbox并等待来信，再由本人确认、处理和回复；预算/截止/停止后返回，不自行开新inbox循环。等待不证明被动唤醒或模型开始处理。'});
+ for(const name of collaborationToolNames(identity.kind,identity)){
+  const shape=shapes(identity.kind,identity)[name];
   server.registerTool(name,{description:descriptions[name]??'按固定成员、当前组和记录ACL执行受限协作操作',inputSchema:z.object(shape).strict()},(args,extra)=>{
    const invocation=(async()=>{
    try{const signals=[lifecycle.signal,signal,extra.signal].filter(Boolean);const output=await view.invoke(name,args,{signal:AbortSignal.any(signals)});audit({event:'tool_completed',tool:name,instanceId:identity.instanceId,success:true,outputSha256:sha256(JSON.stringify(output))});return{content:[{type:'text',text:JSON.stringify(output)}],structuredContent:output};}
