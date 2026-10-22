@@ -6,6 +6,7 @@ import {createHash} from 'node:crypto';
 import {makeTaskBinding,readOrdinary,ordinaryPath,readCredential} from './qwen-media-adapter.mjs';
 import {isPublicIPv4} from './content-download.mjs';
 import {containsCredentialMaterial} from './qwen-error-diagnostics.mjs';
+import {validateWorkBuddyHistoryPolicy,parseWorkBuddyHistoryContent,WorkBuddyPrivateHistory,workBuddyHistoryContainsCredential} from './workbuddy-history-content.mjs';
 
 export const WORKBUDDY_LOCAL_ORIGIN='https://www.workbuddy.cn';
 const BASE='/openapi/v2/localassistant',READ='user.localassistant.readable',INVOKE='user.localassistant.invokable';
@@ -13,12 +14,12 @@ const hash=b=>createHash('sha256').update(b).digest('hex'),stop=code=>Object.ass
 const check=(ok,code)=>{if(!ok)throw stop(code);},id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(v);
 const exact=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===keys.slice().sort().join(',');
 const canonical=v=>JSON.stringify(v&&typeof v==='object'?Array.isArray(v)?v.map(x=>JSON.parse(canonical(x))):Object.fromEntries(Object.keys(v).sort().map(k=>[k,JSON.parse(canonical(v[k]))])):v);
-const safeId=(v,token)=>id(v)&&!containsCredentialMaterial(v,token)?v:null;
+const safeId=(v,token)=>id(v)&&!workBuddyHistoryContainsCredential(v,token)?v:null;
 const json=f=>JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(readOrdinary(f,65536)));
 function save(file,value){ordinaryPath(path.dirname(file));ordinaryPath(file,false);const fd=fs.openSync(file,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
 export function makeWorkBuddyLocalBinding(projectRoot,taskId){return{...makeTaskBinding(projectRoot,taskId),schema:'workbuddy_localassistant_task_binding_v1'};}
 export function workBuddyLocalFailureCode(failure){return typeof failure?.code==='string'&&/^WB_LOCAL_[A-Z_]{1,70}$/.test(failure.code)?failure.code:'WB_LOCAL_OPERATION_UNKNOWN';}
-export function workBuddyLocalApprovalContextSha256(config,request){return hash(canonical({schema:'workbuddy_localassistant_approval_context_v1',bindingSha256:config.bindingSha256,mode:config.mode,origin:config.origin,authorityId:config.authorization?.authorityId??null,grantedScopes:Array.isArray(config.authorization?.scopes)?[...config.authorization.scopes].sort():[],allowOwnerWideHistory:config.authorization?.allowOwnerWideHistory===true,maxRequestsTotal:config.maxRequestsTotal??0,request}));}
+export function workBuddyLocalApprovalContextSha256(config,request){return hash(canonical({schema:config.historyContentPolicy?'workbuddy_localassistant_approval_context_v2':'workbuddy_localassistant_approval_context_v1',bindingSha256:config.bindingSha256,mode:config.mode,origin:config.origin,authorityId:config.authorization?.authorityId??null,grantedScopes:Array.isArray(config.authorization?.scopes)?[...config.authorization.scopes].sort():[],allowOwnerWideHistory:config.authorization?.allowOwnerWideHistory===true,maxRequestsTotal:config.maxRequestsTotal??0,...(config.historyContentPolicy?{historyContentPolicy:validateWorkBuddyHistoryPolicy(config.historyContentPolicy),historyStorage:'derived_project_runtime_host_private'}:{}),request}));}
 
 export function validateWorkBuddyLocalRequest(request) {
  let url;try{url=new URL(request.url);}catch{throw stop('WB_LOCAL_ENDPOINT_FORBIDDEN');}
@@ -41,7 +42,7 @@ export async function nativeWorkBuddyLocalTransport(request) {
    if(response.headers['content-encoding']&&response.headers['content-encoding']!=='identity'){response.destroy();finish('WB_LOCAL_RESPONSE_UNKNOWN');return;}
    let count=0;const chunks=[];response.on('data',chunk=>{if(done)return;count+=chunk.length;if(count>1048576){response.destroy();finish('WB_LOCAL_RESPONSE_TOO_LARGE');}else chunks.push(chunk);});
    response.once('aborted',()=>finish('WB_LOCAL_RESPONSE_UNKNOWN'));response.once('error',()=>finish('WB_LOCAL_RESPONSE_UNKNOWN'));
-   response.once('end',()=>{try{finish(null,{httpStatus:response.statusCode,body:JSON.parse(Buffer.concat(chunks).toString('utf8'))});}catch{finish('WB_LOCAL_RESPONSE_UNKNOWN');}});
+   response.once('end',()=>{try{finish(null,{httpStatus:response.statusCode,body:JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)))});}catch{finish('WB_LOCAL_RESPONSE_UNKNOWN');}});
   });deadline=setTimeout(()=>{responseRef?.destroy();req.destroy();finish('WB_LOCAL_NETWORK_UNKNOWN');},15000);req.once('error',()=>finish('WB_LOCAL_NETWORK_UNKNOWN'));req.end(bytes);
  });
 }
@@ -52,10 +53,14 @@ export class WorkBuddyLocalAssistantCandidate {
  constructor(config,{transport=nativeWorkBuddyLocalTransport}={}) {
   check(config.schema==='workbuddy_localassistant_host_v1'&&config.mode==='localassistant'&&config.origin===WORKBUDDY_LOCAL_ORIGIN,'WB_LOCAL_CONFIG_INVALID');
   const scopes=config.authorization?.scopes;check(scopes===undefined||Array.isArray(scopes)&&scopes.length<=32&&new Set(scopes).size===scopes.length&&scopes.every(s=>typeof s==='string'&&/^[a-z][a-z0-9_.]{0,95}$/.test(s)),'WB_LOCAL_AUTHORIZATION_INVALID');
+  if(config.historyContentPolicy)validateWorkBuddyHistoryPolicy(config.historyContentPolicy);
   this.#config=structuredClone(config);this.#transport=transport;this.#binding=json(config.bindingFile);this.verify();this.#base=path.join(this.#binding.taskRoot,'work','workbuddy-localassistant');
  }
  verify(){const c=this.#config,b=this.#binding;check(hash(readOrdinary(c.bindingFile,65536))===c.bindingSha256&&JSON.stringify(makeWorkBuddyLocalBinding(b.projectRoot,b.taskId))===JSON.stringify(b),'WB_LOCAL_BINDING_CHANGED');let reserved=false;try{fs.lstatSync(path.join(b.taskRoot,'.os-worker'));reserved=true;}catch(f){if(f.code!=='ENOENT')throw f;}check(!reserved,'WB_LOCAL_OS_BACKEND_REQUIRED');}
  #read(operationId){check(id(operationId),'WB_LOCAL_OPERATION_INVALID');return json(path.join(this.#base,`operation-${operationId}`,'result.json'));}
+ #history(){check(this.#config.historyContentPolicy,'WB_LOCAL_HISTORY_POLICY_REQUIRED');this.verify();try{return new WorkBuddyPrivateHistory({binding:this.#binding,bindingSha256:this.#config.bindingSha256,authorityId:this.#config.authorization.authorityId,policy:this.#config.historyContentPolicy,controlRoot:this.#base});}catch(error){throw stop(workBuddyLocalFailureCode(error));}}
+ #historyApproval(plan,approval){check(this.#config.authorization?.allowOwnerWideHistory===true&&approval?.permission==='read_localassistant_history_text_private_once'&&approval.ownerWideUncorrelatedHistoryAcknowledged===true&&approval.requestSha256===plan.requestSha256&&approval.contextSha256===plan.approvalContextSha256&&approval.maxRequests===1&&Date.parse(approval.expiresAt)>Date.now(),'WB_LOCAL_HISTORY_CONTENT_APPROVAL_REQUIRED');}
+ readPrivateHistory(request,ref){const p=this.preflight(request),plan=this.#plan(request);check(!p.missingPrerequisites.length&&request.operation==='read_assistant_messages','WB_LOCAL_OAUTH_SCOPE_REQUIRED');this.#historyApproval(plan,this.#config.approvals?.[request.operationId]);const store=this.#history();try{const value=store.read(ref);check(value.operationId===request.operationId&&value.approvalContextSha256===plan.approvalContextSha256&&value.bindingSha256===this.#config.bindingSha256&&value.authorityId===this.#config.authorization.authorityId,'WB_LOCAL_PRIVATE_RECEIPT_CHANGED');return value;}finally{store.close();}}
  #reserve(name,value){this.verify();ordinaryPath(this.#base,false);fs.mkdirSync(this.#base,{recursive:true});const dir=path.join(this.#base,name);ordinaryPath(dir,false);try{fs.mkdirSync(dir);}catch(f){if(f.code==='EEXIST')return null;throw stop('WB_LOCAL_RESERVATION_UNKNOWN');}save(path.join(dir,'intent.json'),value);return dir;}
  #plan(request){
   this.verify();check(exact(request,['operationId','operation','arguments'])&&id(request.operationId),'WB_LOCAL_REQUEST_INVALID');
@@ -74,11 +79,14 @@ export class WorkBuddyLocalAssistantCandidate {
   const preflight=this.preflight(request);check(!preflight.missingPrerequisites.length,'WB_LOCAL_OAUTH_SCOPE_REQUIRED');
   const plan=this.#plan(request),config=this.#config,approval=config.approvals?.[request.operationId];
   check(approval?.requestSha256===plan.requestSha256&&approval.contextSha256===plan.approvalContextSha256&&approval.maxRequests===1&&Date.parse(approval.expiresAt)>Date.now()&&(plan.method!=='POST'||approval.permission==='post_localassistant_text_once'&&approval.modelExecutionMayBeTriggered===true),'WB_LOCAL_REVIEW_REQUIRED');
+  const historyContent=request.operation==='read_assistant_messages'&&config.historyContentPolicy;if(historyContent)this.#historyApproval(plan,approval);
   check(Number.isInteger(config.maxRequestsTotal)&&config.maxRequestsTotal>=1&&config.maxRequestsTotal<=100,'WB_LOCAL_BUDGET_EXCEEDED');
   if(plan.method==='POST'){const status=this.#read(request.arguments.statusOperationId);check(status.status==='status_read'&&status.online===true&&status.authorityId===config.authorization.authorityId&&status.bindingSha256===config.bindingSha256&&Date.parse(status.observedAt)<=Date.now()&&Date.now()-Date.parse(status.observedAt)<=300000,'WB_LOCAL_ONLINE_STATUS_REQUIRED');}
-  const token=readCredential(config.authorization.accessTokenFile);check(!containsCredentialMaterial(request.operationId,token)&&!containsCredentialMaterial(config.authorization.authorityId,token)&&!containsCredentialMaterial(plan.body?.content,token),'WB_LOCAL_CREDENTIAL_IN_REQUEST');
+  const token=readCredential(config.authorization.accessTokenFile);check(!workBuddyHistoryContainsCredential(request.operationId,token)&&!workBuddyHistoryContainsCredential(config.authorization.authorityId,token)&&!workBuddyHistoryContainsCredential(plan.body?.content,token)&&!workBuddyHistoryContainsCredential(plan.url,token),'WB_LOCAL_CREDENTIAL_IN_REQUEST');
   const dir=this.#reserve(`operation-${request.operationId}`,{operation:request.operation,requestSha256:plan.requestSha256,automaticRetry:false});
   if(!dir)return{operationId:request.operationId,status:'reserved_or_finished',deduplicated:true,automaticRetry:false};
+  let historyStore=null,historyCursor=null;try{
+  if(historyContent){historyStore=this.#history();const after=this.#read(request.arguments.afterOperationId);historyCursor={...historyStore.reserveCursor(after.message_id,request.operationId,plan.approvalContextSha256),afterMessageId:after.message_id};if(!historyCursor.reserved){const duplicate={operationId:request.operationId,status:'reserved_or_finished',deduplicated:true,automaticRetry:false,historyCursorAlreadyReserved:true,contentPersisted:false};save(path.join(dir,'result.json'),duplicate);return duplicate;}}
   if(plan.method==='POST'){
    const key=hash(canonical({bindingSha256:config.bindingSha256,authorityId:config.authorization.authorityId,body:plan.body}));
    if(!this.#reserve(`message-payload-${key}`,{operationId:request.operationId,automaticRetry:false})){const duplicate={operationId:request.operationId,status:'reserved_or_finished',deduplicated:true,automaticRetry:false};save(path.join(dir,'result.json'),duplicate);return duplicate;}
@@ -90,12 +98,18 @@ export class WorkBuddyLocalAssistantCandidate {
    const data=response.body.data;check(data&&typeof data==='object'&&!Array.isArray(data),'WB_LOCAL_RESPONSE_UNKNOWN');
    if(request.operation==='get_assistant_status'){check(typeof data.online==='boolean','WB_LOCAL_RESPONSE_UNKNOWN');result={...result,status:'status_read',online:data.online};}
    else if(request.operation==='post_assistant_message'){const message_id=safeId(data.message_id,token);check(message_id,'WB_LOCAL_RESPONSE_UNKNOWN');result={...result,status:'message_accepted',message_id,messageReceiptVerified:true};}
-   else {
+   else if(historyContent){
+    check(Date.parse(config.authorization.expiresAt)>Date.now()&&Date.parse(approval.expiresAt)>Date.now(),'WB_LOCAL_HISTORY_APPROVAL_EXPIRED');
+    const parsed=parseWorkBuddyHistoryContent(data.messages,{token,policy:config.historyContentPolicy});this.verify();
+    const ref=historyStore.persist(parsed,{cursorSha:historyCursor.cursorSha,operationId:request.operationId,approvalContextSha256:plan.approvalContextSha256,request_id:result.request_id,afterMessageId:historyCursor.afterMessageId});
+    result={...result,status:ref.completePlainText?'history_text_read':'history_text_partial',historyContentRef:ref,contentPersisted:true,rawResponsePersisted:false,historyConversationCorrelationVerified:false,assistantTaskProcessingVerified:false,permissionResponsesSent:0};
+   }else {
     check(Array.isArray(data.messages)&&data.messages.length<=100,'WB_LOCAL_RESPONSE_TOO_LARGE');
     const messages=data.messages.map(row=>({message_id:safeId(row?.message_id,token),role:['user','assistant'].includes(row?.role)?row.role:null,msg_type:typeof row?.msg_type==='string'&&/^[a-z_]{1,40}$/.test(row.msg_type)&&!containsCredentialMaterial(row.msg_type,token)?row.msg_type:null,contentAvailable:Array.isArray(row?.content)&&row.content.length>0}));
     result={...result,status:'history_read',messages,historyConversationCorrelationVerified:false,contentPersisted:false,permissionResponsesSent:0};
    }
   }catch(failure){result.code=workBuddyLocalFailureCode(failure);}
   save(path.join(dir,'result.json'),result);return result;
+  }finally{historyStore?.close();}
  }
 }

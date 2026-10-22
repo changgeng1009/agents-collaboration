@@ -186,3 +186,5 @@
 !/tests/core-qwen-media.integration.mjs
 !/bridge/scripts/core-qwen-host-plan.mjs
 !/tests/core-qwen-config.integration.mjs
+!/bridge/src/workbuddy-history-content.mjs
+!/tests/workbuddy-history-content.integration.mjs
