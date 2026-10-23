@@ -5,6 +5,8 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/qwen-system-voices.mjs',
+  'tests/qwen-system-voices.test.mjs',
   'bridge/src/windows-task-file-configuration.mjs',
   'bridge/native/WindowsFileWorker/BindingInspector.cs',
   'tests/task-file-worker-configuration.integration.mjs',

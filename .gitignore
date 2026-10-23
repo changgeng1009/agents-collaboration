@@ -198,3 +198,5 @@
 !/tests/task-file-lease-backend.fixture.mjs
 !/tests/market-text-revision.fixture.mjs
 !/tests/market-text-revision.integration.mjs
+!/bridge/src/qwen-system-voices.mjs
+!/tests/qwen-system-voices.test.mjs
