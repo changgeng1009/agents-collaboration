@@ -5,6 +5,12 @@ import { parseArgs } from 'node:util';
 
 // 此白名单只包含公开开发文件；不遍历运行数据、日志、文档或认证目录。
 export const PUBLIC_FILES = [
+  'bridge/src/windows-task-file-configuration.mjs',
+  'bridge/native/WindowsFileWorker/BindingInspector.cs',
+  'tests/task-file-worker-configuration.integration.mjs',
+  'tests/task-file-worker-restore.integration.mjs',
+  'tests/task-file-lease-backend.integration.mjs',
+  'tests/task-file-lease-backend.fixture.mjs',
   'bridge/src/workbuddy-history-content.mjs',
   'tests/workbuddy-history-content.integration.mjs',
   'bridge/src/core-qwen-media.mjs',

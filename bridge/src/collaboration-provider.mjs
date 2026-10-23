@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { PROJECT_ROOT, SOURCE_ROOT, fail, sha256, inside } from './policy.mjs';
 import { CodeBuddyCliAdapter, normalizeCodeBuddyConfiguration } from './codebuddy-cli-adapter.mjs';
 import { sessionPath, readBoundedFile } from './session-files.mjs';
+import { taskFileScopeSha256 } from './windows-task-file-configuration.mjs';
 
 const workerFile=fileURLToPath(new URL('./collaboration-execution-worker.mjs',import.meta.url));
 export class CodeBuddyCollaborationProvider{
@@ -28,7 +29,7 @@ export class CodeBuddyCollaborationProvider{
   const directory=sessionPath(path.join(task.workspace.work,'collaboration-execution',intent.executionId),false);fs.mkdirSync(directory,{recursive:true});
   const configurationFile=path.join(directory,'runner-config.json'),configurationBytes=Buffer.from(JSON.stringify(plan.configuration));fs.writeFileSync(configurationFile,configurationBytes,{flag:'wx',mode:0o600});
   const outputFile=path.join(directory,'worker-output.txt'),fd=fs.openSync(outputFile,'wx',0o600);
-  store.tx(()=>{const current=store.get('execution',intent.executionId);current.state='worker_starting';current.workerScriptHash=plan.workerScriptHash;current.configurationHash=sha256(configurationBytes);current.configurationFile=configurationFile;store.put('execution',current.executionId,current);});
+  store.tx(()=>{const current=store.get('execution',intent.executionId);current.state='worker_starting';current.workerScriptHash=plan.workerScriptHash;current.configurationHash=sha256(configurationBytes);current.configurationFile=configurationFile;if(store.fileWorker?.selectionMode==='exact_tasks'&&store.fileWorker.appliesTo(task))current.fileWorkerContext={pin:structuredClone(store.fileWorker.configurationPin),runtimeRoot:store.runtimeRoot,workspaceBinding:task.workspace.markerSha256,scopeSha256:taskFileScopeSha256(task.scope)};store.put('execution',current.executionId,current);});
   let child;
   try{
    child=fork(workerFile,['--db',store.dbPath,'--execution-id',intent.executionId,'--configuration',configurationFile],{execPath:process.execPath,execArgv:[],cwd:task.workspace.cwd,env:{...plan.env,COLLAB_PROJECT_ROOT:PROJECT_ROOT,...(this.evidenceLevel==='local_test'?{COLLAB_TEST_MODE:'1'}:{})},detached:true,windowsHide:true,stdio:['ignore',fd,fd,'ipc']});

@@ -7,6 +7,7 @@ import { assertExecutionLease, updateExecutionFromProvider } from './collaborati
 import { CodeBuddyCliAdapter } from './codebuddy-cli-adapter.mjs';
 import { sessionPath, readBoundedFile } from './session-files.mjs';
 import { PROJECT_ROOT, SOURCE_ROOT, inside, sha256 } from './policy.mjs';
+import { restoreExecutionFileBackend } from './windows-task-file-configuration.mjs';
 
 if(!process.send)throw new Error('受管执行只接受本项目新建 IPC 子进程。');
 const{values}=parseArgs({options:{db:{type:'string'},'execution-id':{type:'string'},configuration:{type:'string'}}});
@@ -20,6 +21,7 @@ process.once('message',async message=>{
   if(sha256(configurationBytes)!==intent.configurationHash||values.configuration!==intent.configurationFile||sha256(fs.readFileSync(fileURLToPath(import.meta.url)))!==intent.workerScriptHash)throw new Error('受管执行源码或配置 pin 已变化。');
   const configuration=JSON.parse(configurationBytes.toString('utf8'));
   if(intent.evidenceLevel==='local_test'&&(process.env.COLLAB_TEST_MODE!=='1'||PROJECT_ROOT===SOURCE_ROOT||!inside(PROJECT_ROOT,path.resolve(configuration.cliScript))))throw new Error('测试不能执行官方入口。');
+  restoreExecutionFileBackend(store,context);
   const fileService=fileURLToPath(new URL('./collaboration-file-server.mjs',import.meta.url));
   class GroupCodeBuddyAdapter extends CodeBuddyCliAdapter{
    prepare(...args){const plan=super.prepare(...args);if(plan.fileToolsEnabled){plan.probeScript=fileService;plan.probeSha256=sha256(fs.readFileSync(fileService));plan.mcpConfiguration.mcpServers.t2_candidate.args[0]=fileService;plan.fileBinding={workspace:context.task.workspace,scope:context.task.scope,collaboration:{dbPath:store.dbPath,executionId:intent.executionId,token}};}return plan;}

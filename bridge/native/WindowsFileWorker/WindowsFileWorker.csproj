@@ -7,5 +7,5 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
-  <ItemGroup><Compile Include="Native.cs"/><Compile Include="Program.cs"/></ItemGroup>
+  <ItemGroup><Compile Include="Native.cs"/><Compile Include="Program.cs"/><Compile Include="BindingInspector.cs"/></ItemGroup>
 </Project>

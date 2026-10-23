@@ -13,7 +13,7 @@ using System.Text.Json;
 
 internal sealed record Configuration(string TaskRoot,string AllowedParent,string ProfileName,string BuildDirectory,string DotnetRoot);
 internal sealed record Prepared(string TaskRoot,string ProfileName,string Sid,string ProfileFolder,string RuntimeDirectory,string[] AclPaths);
-internal sealed record Job(string Operation,string Target,string? Text,string ExpectedSid,string? ChildExecutable=null,string? Canary=null,string? Input=null,string? Work=null,string? Outputs=null);
+internal sealed record Job(string Operation,string Target,string? Text,string ExpectedSid,string? ChildExecutable=null,string? Canary=null,string? Input=null,string? Work=null,string? Outputs=null,JsonElement? ExpectedInspection=null);
 internal static class Program
 {
     static readonly JsonSerializerOptions Json=new(){PropertyNameCaseInsensitive=true};
@@ -67,6 +67,8 @@ internal static class Program
     static object Launch(Configuration config,Prepared prepared,Job request)
     {
         Validate(config);if(prepared.TaskRoot!=Path.GetFullPath(config.TaskRoot)||prepared.ProfileName!=config.ProfileName||request.ExpectedSid!=prepared.Sid)throw new InvalidOperationException("原任务/profile/SID绑定不符");
+        using var inspection=request.ExpectedInspection.HasValue?new BindingInspector(config,prepared):null;
+        if(inspection!=null)inspection.VerifyExpected(request.ExpectedInspection!.Value);
         var derive=Native.DeriveAppContainerSidFromAppContainerName(prepared.ProfileName,out var sid);if(derive!=0)Marshal.ThrowExceptionForHR(derive);
         Native.ProcessInformation process=default;IntPtr attributes=IntPtr.Zero,capsPointer=IntPtr.Zero,handlesPointer=IntPtr.Zero,environment=IntPtr.Zero,jobHandle=IntPtr.Zero;var inherited=new List<IntPtr>();
         var operationId=Guid.NewGuid().ToString("N");var output=Path.Combine(config.TaskRoot,"work","files","worker-"+operationId+".stdout");var error=Path.Combine(config.TaskRoot,"work","files","worker-"+operationId+".stderr");
@@ -87,6 +89,7 @@ internal static class Program
             Native.Check(Native.CreateProcess(executable,new StringBuilder('"'+executable+"\" \""+assembly+"\" --worker-file \""+frame+"\""),IntPtr.Zero,IntPtr.Zero,true,0x80000|0x400|0x4|0x8000000,environment,config.TaskRoot,ref startup,out process),"CreateProcess AppContainer");
             var token=Native.Token(process.Process);var tokenJson=JsonSerializer.SerializeToElement(token);if(!tokenJson.GetProperty("isAppContainer").GetBoolean()||tokenJson.GetProperty("appContainerSid").GetString()!=prepared.Sid||tokenJson.GetProperty("integritySid").GetString()!="S-1-16-4096"||tokenJson.GetProperty("capabilityCount").GetInt32()!=0)throw new InvalidOperationException("实际子进程token不符合AppContainer低完整性零能力");
             jobHandle=Native.CreateJobObject(IntPtr.Zero,null);Native.Check(jobHandle!=IntPtr.Zero,"CreateJobObject");var limits=new Native.ExtendedLimit{Basic=new Native.BasicLimit{Flags=0x2000}};Native.Check(Native.SetInformationJobObject(jobHandle,9,ref limits,(uint)Marshal.SizeOf<Native.ExtendedLimit>()),"SetInformationJobObject");Native.Check(Native.AssignProcessToJobObject(jobHandle,process.Process),"AssignProcessToJobObject");
+            inspection?.VerifyUnchanged();
             if(Native.ResumeThread(process.Thread)==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error(),"ResumeThread");
             var wait=Native.WaitForSingleObject(process.Process,30000);if(wait!=0)throw new TimeoutException("文件worker超时，结果未知不重试");Native.Check(Native.GetExitCodeProcess(process.Process,out var exitCode),"GetExitCodeProcess");
             foreach(var handle in inherited)Native.CloseHandle(handle);inherited.Clear();
@@ -132,6 +135,7 @@ internal static class Program
             object result;
             if(args.Length==2&&args[0]=="--worker")result=Worker(JsonSerializer.Deserialize<Job>(Convert.FromBase64String(args[1]),Json)??throw new InvalidOperationException("worker请求缺失"));
             else if(args.Length==2&&args[0]=="--worker-file"){if(new FileInfo(args[1]).Length>262144)throw new InvalidOperationException("文件请求帧超界");result=Worker(Read<Job>(args[1]));}
+            else if(args.Length==2&&args[0]=="--inspect-binding"){var config=Read<Configuration>(args[1]);Validate(config);var original=Read<Prepared>(Path.Combine(Control(config),"prepared-state.json"));using var inspection=new BindingInspector(config,original);result=inspection.Observation;}
             else if(args.Length==2&&args[0]=="--prepare")result=Prepare(Read<Configuration>(args[1]));
             else if(args.Length==3&&args[0]=="--run"){var config=Read<Configuration>(args[1]);var prepared=Read<Prepared>(Path.Combine(Control(config),"prepared-state.json"));result=Launch(config,prepared,Read<Job>(args[2]));}
             else throw new InvalidOperationException("必须显式preflight/prepare/run，不执行任意命令");

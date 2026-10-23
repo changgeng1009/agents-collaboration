@@ -2,14 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { PROJECT_ROOT, fail, inside, sha256 } from './policy.mjs';
-import { SessionFiles, sessionPath, SESSION_FILE_LIMIT, validFileArguments } from './session-files.mjs';
+import { PROJECT_ROOT, SOURCE_ROOT, fail, inside, sha256 } from './policy.mjs';
+import { SessionFiles, sessionPath, readBoundedFile, SESSION_FILE_LIMIT, validFileArguments } from './session-files.mjs';
 
 // 本对象只能由可信启动注入；成员参数不接受程序、profile、根目录或认证。
 export class WindowsTaskFiles {
-  constructor({dotnetExecutable,buildDirectory,binaryHashes,allowedWorkspaceParent,profileCreationAccepted=false}) {
+  constructor({dotnetExecutable,buildDirectory,binaryHashes,allowedWorkspaceParent,profileCreationAccepted=false,restorationOnly=false,testHooks=null}) {
     if(process.platform!=='win32')fail('FILE_OS_UNSUPPORTED','当前OS不支持Windows AppContainer。');
-    if(profileCreationAccepted!==true)fail('FILE_OS_PROFILE_NOT_ACCEPTED','尚未明确接受新任务专属profile创建。');
+    if(profileCreationAccepted!==true&&restorationOnly!==true)fail('FILE_OS_PROFILE_NOT_ACCEPTED','尚未明确接受新任务专属profile创建。');
+    if(testHooks&&(process.env.COLLAB_TEST_MODE!=='1'||PROJECT_ROOT===SOURCE_ROOT))fail('FILE_OS_FIXTURE_FORBIDDEN','原生测试替身只允许显式隔离测试根。');
+    this.profileCreationAccepted=profileCreationAccepted===true;this.testHooks=testHooks;
     this.dotnetExecutable=dotnetExecutable;this.buildDirectory=buildDirectory;this.binaryHashes=structuredClone(binaryHashes);
     this.allowedParent=sessionPath(allowedWorkspaceParent);this.bindings=new Map();
     if(!inside(path.join(PROJECT_ROOT,'task-workspaces'),this.allowedParent))fail('FILE_OS_PARENT_FORBIDDEN','OS文件worker父根必须在可信项目的新任务范围。');
@@ -21,16 +23,25 @@ export class WindowsTaskFiles {
       const stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||sha256(fs.readFileSync(file))!==this.binaryHashes[name])fail('FILE_OS_BINARY_CHANGED','受审查文件worker入口或哈希变化。');
     }
   }
-  native(args,cwd,log){
+  runNative(args,cwd){
     this.checkBinaries();
     const environment={};for(const name of ['SystemRoot','windir','USERPROFILE','LOCALAPPDATA','APPDATA'])if(process.env[name])environment[name]=process.env[name];
     environment.DOTNET_ROOT=path.dirname(this.dotnetExecutable);environment.DOTNET_EnableDiagnostics='0';environment.DOTNET_GENERATE_ASPNET_CERTIFICATE='false';
-    const result=spawnSync(this.dotnetExecutable,[path.join(this.buildDirectory,'WindowsFileWorker.dll'),...args],{cwd,env:environment,windowsHide:true,encoding:'utf8',timeout:40000,maxBuffer:2*1024*1024});
+    return this.testHooks?.run?this.testHooks.run(args,{cwd}):spawnSync(this.dotnetExecutable,[path.join(this.buildDirectory,'WindowsFileWorker.dll'),...args],{cwd,env:environment,windowsHide:true,encoding:'utf8',timeout:40000,maxBuffer:2*1024*1024});
+  }
+  inspect(configFile,cwd){
+    const result=this.runNative(['--inspect-binding',configFile],cwd);
+    if(result.error||result.status!==0||typeof result.stdout!=='string'||Buffer.byteLength(result.stdout)>262144)fail('FILE_OS_INSPECTION_UNKNOWN','只读绑定复核失败，不能创建profile、修ACL或回退。');
+    try{return JSON.parse(result.stdout);}catch{fail('FILE_OS_INSPECTION_UNKNOWN','只读绑定复核没有完整JSON结果。');}
+  }
+  native(args,cwd,log){
+    const result=this.runNative(args,cwd);
     fs.writeFileSync(log,JSON.stringify({at:new Date().toISOString(),status:result.status,errorCode:result.error?.code??null,stdout:result.stdout??'',stderr:result.stderr??'',automaticRetry:false},null,2),{flag:'wx'});
     if(result.error||result.status!==0)fail('FILE_OS_OPERATION_UNKNOWN','OS worker启动或结果失败，保留占位与文件，不自动重试。');
     let output;try{output=JSON.parse(result.stdout);}catch{fail('FILE_OS_RECEIPT_INVALID','未取得有界文件worker回执。');}return output;
   }
   prepareTask({workspace,scope}){
+    if(!this.profileCreationAccepted)fail('FILE_OS_PROFILE_NOT_ACCEPTED','只读恢复实例不能执行新profile准备。');
     const files=new SessionFiles({workspace,scope}),root=files.workspace.cwd;
     if(!inside(this.allowedParent,root)||path.resolve(root)===this.allowedParent)fail('FILE_OS_TASK_FORBIDDEN','任务不属于明确允许的新任务父根。');
     const directory=sessionPath(path.join(root,'.os-worker'),false);if(fs.existsSync(directory))fail('FILE_OS_ALREADY_RESERVED','任务已有隔离意图，不接管或自动重建profile。');
@@ -44,13 +55,18 @@ export class WindowsTaskFiles {
     for(const[name,hash]of Object.entries(binding.runtimeHashes))if(hash!==this.binaryHashes[name])fail('FILE_OS_RUNTIME_CHANGED','复制到任务的受限runtime哈希不符。');
     this.bindings.set(workspace.taskId,binding);return{configured:true,prepared:true,mechanism:'windows_appcontainer',profileName,profileRetained:true,workerOsIsolationVerified:false,platformOsIsolationVerified:false};
   }
-  binding(workspace){const binding=this.bindings.get(workspace.taskId);if(!binding||binding.workspaceBinding!==workspace.markerSha256)fail('FILE_OS_NOT_PREPARED','当前任务没有可信准备的OS worker，不能回退普通文件进程。');for(const[name,hash]of Object.entries(binding.runtimeHashes))if(sha256(fs.readFileSync(path.join(binding.runtimeDirectory,name)))!==hash)fail('FILE_OS_RUNTIME_CHANGED','任务内runtime已改变。');return binding;}
+  restoreTask(task,verify){
+    if(typeof verify!=='function')fail('FILE_OS_BINDING_INVALID','恢复只能由可信factory提供完整复核。');
+    const binding=verify();new SessionFiles({workspace:task.workspace,scope:task.scope});
+    this.bindings.set(task.workspace.taskId,{...binding,restoreVerification:verify,lastAttestation:null});
+  }
+  binding(workspace){const binding=this.bindings.get(workspace.taskId);if(!binding||binding.workspaceBinding!==workspace.markerSha256)fail('FILE_OS_NOT_PREPARED','当前任务没有可信准备的OS worker，不能回退普通文件进程。');binding.restoreVerification?.();for(const[name,hash]of Object.entries(binding.runtimeHashes)){const raw=readBoundedFile(path.join(binding.runtimeDirectory,name),16*1024*1024);if(raw.sha256!==hash||binding.runtimeFileIdentities&&JSON.stringify(raw.identity)!==JSON.stringify(binding.runtimeFileIdentities[name]))fail('FILE_OS_RUNTIME_CHANGED','任务内runtime字节或原文件身份已改变。');}return binding;}
   invoke({workspace,scope},args,operation){
     if(!validFileArguments(operation==='read'?'read_task_file':'write_task_file',args))fail('FILE_ARGUMENT_INVALID','只接收当前任务有界文件结构，inputs对OS worker只读。');
     const files=new SessionFiles({workspace,scope}),binding=this.binding(workspace),target=files.target(args.area,args.relativePath);
     if(operation==='write'){fs.mkdirSync(sessionPath(path.dirname(target),false),{recursive:true});files.verify();}
     const operationId=randomUUID(),jobFile=path.join(binding.directory,`request-${operationId}.json`),log=path.join(binding.directory,`receipt-${operationId}.json`);
-    const job={Operation:operation,Target:target,Text:operation==='write'?args.text:null,ExpectedSid:binding.sid};fs.writeFileSync(jobFile,JSON.stringify(job),{flag:'wx',mode:0o600});
+    const job={Operation:operation,Target:target,Text:operation==='write'?args.text:null,ExpectedSid:binding.sid,...(binding.inspection?{ExpectedInspection:binding.inspection}:{})};fs.writeFileSync(jobFile,JSON.stringify(job),{flag:'wx',mode:0o600});
     const output=this.native(['--run',binding.configFile,jobFile],workspace.cwd,log),actual=output.workerResult;
     if(output.exitCode!==0||!actual||actual.status==='failed_or_blocked')fail('FILE_OS_OPERATION_UNKNOWN','受限文件worker未取得成功终态，原文件/意图保留。');
     const token=output.token;

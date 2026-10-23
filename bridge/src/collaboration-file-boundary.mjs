@@ -7,7 +7,7 @@ import {SessionFiles,sessionPath} from './session-files.mjs';
 // .os-worker在任何profile/ACL副作用前独占创建；成功、失败及unknown均保留。
 export function operateTaskFile(store,task,operation,args,{manager=false}={}){
  if(!['read','write'].includes(operation))fail('FILE_OPERATION_INVALID','仅允许固定的有界文件读写。');
- if(store.fileWorker)return store.fileWorker[operation](task,args);
+ if(store.fileWorker&&(store.fileWorker.selectionMode!=='exact_tasks'||store.fileWorker.appliesTo(task)))return store.fileWorker[operation](task,args);
  const intent=sessionPath(path.join(task.workspace.cwd,'.os-worker'),false);
  let reserved=false;
  try{fs.lstatSync(intent);reserved=true;}catch(error){if(error.code!=='ENOENT')throw error;}

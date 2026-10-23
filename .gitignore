@@ -188,3 +188,10 @@
 !/tests/core-qwen-config.integration.mjs
 !/bridge/src/workbuddy-history-content.mjs
 !/tests/workbuddy-history-content.integration.mjs
+
+!/bridge/src/windows-task-file-configuration.mjs
+!/bridge/native/WindowsFileWorker/BindingInspector.cs
+!/tests/task-file-worker-configuration.integration.mjs
+!/tests/task-file-worker-restore.integration.mjs
+!/tests/task-file-lease-backend.integration.mjs
+!/tests/task-file-lease-backend.fixture.mjs
