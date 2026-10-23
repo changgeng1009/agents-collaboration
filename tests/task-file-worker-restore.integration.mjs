@@ -65,3 +65,54 @@ test('Spec4 最终manifest已存在而intent缺失时prepare次数为0且不覆�
  const target=path.join(path.dirname(f.manifestFile),'preexisting.json');fs.writeFileSync(target,'keep-original');const approval=JSON.parse(fs.readFileSync(f.approvalPin.path));approval.manifestFile=target;const pin=writeJson(path.join(path.dirname(f.approvalPin.path),'preexisting-approval.json'),approval);
  const before=f.counters.syntheticPrepare;assert.equal(fs.existsSync(target+'.intent.json'),false);assert.throws(()=>prepareTaskFileBinding(f.worker,f.task,{runtimeRoot:f.store.runtimeRoot,manifestFile:target,approvalPin:pin}),e=>e.code==='EEXIST');assert.equal(f.counters.syntheticPrepare,before);assert.equal(fs.readFileSync(target,'utf8'),'keep-original');assert.equal(fs.existsSync(target+'.intent.json'),false);
  }finally{f.close();}});
+
+function t32Observation(f,id,details){
+ assert.equal(f.counters.realNativeRuns,0);assert.equal(f.counters.realProfileApis,0);assert.equal(f.counters.realAclChanges,0);
+ writeJson(path.join(f.task.workspace.work,`T32-${id}-observation.json`),{schema:'t32_offline_observation_v1',id,groupId:id.split('_')[0],passed:true,evidenceLevel:'synthetic_fixture_only',realOsVerified:false,realNativeHostRuns:0,realProfileApis:0,realAclChanges:0,...details});
+}
+test('T32 O1 inspector三类失败拒绝新binding且不启动文件worker',async()=>{
+ for(const variant of ['nonzero','timeout','invalid_json']){const f=await fixture();try{
+  const backend=f.reopen();let attempted=0;const injected=variant==='nonzero'?{status:17,stdout:'{}',stderr:'synthetic inspect failure'}:variant==='timeout'?{status:null,error:Object.assign(new Error('synthetic timeout'),{code:'ETIMEDOUT'}),stdout:'',stderr:''}:{status:0,stdout:'{',stderr:''};
+  f.options.testHooks.run=args=>{assert.equal(args[0],'--inspect-binding');attempted++;return injected;};
+  const beforeRun=f.counters.syntheticRun??0;assert.throws(()=>backend.read(f.task,{area:'inputs',relativePath:'source.txt'}),error('FILE_OS_INSPECTION_UNKNOWN'));
+  const caps=backend.capabilities(f.task);assert.equal(attempted,1);assert.equal(caps.taskPrepared,false);assert.equal(caps.workerOsIsolationVerified,false);assert.equal(f.counters.syntheticRun??0,beforeRun);
+  t32Observation(f,'O1_'+variant,{variant,inspectAttempts:attempted,injected:{status:injected.status,errorCode:injected.error?.code??null,stdout:injected.stdout,stderr:injected.stderr},taskPrepared:caps.taskPrepared,attestation:caps.workerOsIsolationVerified,fileWorkerRunDelta:0});
+ }finally{f.close();}}
+});
+test('T32 O2 已恢复后配置pin撤销阻断core与现存lease缓存',async()=>{const f=await fixture();try{
+ f.store.fileWorker=f.backend;const files=lease(f);await f.call('read_task_file',{...f.binding,area:'inputs',relativePath:'source.txt'});assert.equal(f.backend.capabilities(f.task).workerOsIsolationVerified,true);
+ const original=fs.readFileSync(f.pin.path);fs.writeFileSync(path.join(f.task.workspace.work,'T32-O2-original-backend.json'),original,{flag:'wx'});fs.appendFileSync(f.pin.path,'\n');
+ const beforeInspect=f.counters.syntheticInspect,beforeRun=f.counters.syntheticRun;
+ await assert.rejects(()=>f.call('read_task_file',{...f.binding,area:'inputs',relativePath:'source.txt'}),error('FILE_OS_CONFIGURATION_CHANGED'));
+ assert.equal(f.counters.syntheticInspect,beforeInspect);assert.equal(f.counters.syntheticRun,beforeRun);t32Observation(f,'O2_core',{entry:'core_read',originalConfigurationSha256:sha256(original),newConfigurationSha256:sha256(fs.readFileSync(f.pin.path)),inspectorDelta:0,fileWorkerRunDelta:0});
+ assert.throws(()=>files.read({area:'inputs',relativePath:'source.txt'}),error('FILE_OS_CONFIGURATION_CHANGED'));
+ assert.equal(f.counters.syntheticInspect,beforeInspect);assert.equal(f.counters.syntheticRun,beforeRun);t32Observation(f,'O2_lease',{entry:'existing_lease_read',inspectorDelta:0,fileWorkerRunDelta:0,leaseSimulation:true,realPlatformProcessStarted:false});
+ }finally{f.close();}});
+test('T32 O3 外层token有效时仍拒绝独立内层错误SID',async()=>{const f=await fixture();try{
+ const expectedSid=JSON.parse(fs.readFileSync(f.manifestFile)).sid;let observed;
+ f.counters.mutateOutput=output=>{assert.equal(output.token.appContainerSid,expectedSid);output.workerResult.token=structuredClone(output.token);assert.notEqual(output.workerResult.token,output.token);output.workerResult.token.appContainerSid='S-1-15-2-987-654';observed={outer:structuredClone(output.token),inner:structuredClone(output.workerResult.token),differentObjects:output.token!==output.workerResult.token};};
+ assert.throws(()=>f.backend.read(f.task,{area:'inputs',relativePath:'source.txt'}),error('FILE_OS_TOKEN_INVALID'));assert.equal(observed.outer.appContainerSid,expectedSid);assert.notEqual(observed.inner.appContainerSid,expectedSid);assert.equal(observed.differentObjects,true);assert.equal(f.counters.syntheticRun,1);assert.equal(f.backend.capabilities(f.task).workerOsIsolationVerified,false);
+ t32Observation(f,'O3_inner_sid',{simulatedTokens:observed,expectedSid,rejectionCode:'FILE_OS_TOKEN_INVALID',fileWorkerRuns:1});
+ }finally{f.close();}});
+test('T32 O4 写后PID错配保留原文件和unknown且重放不重投',async()=>{const f=await fixture();try{
+ f.store.fileWorker=f.backend;let observed;f.counters.mutateOutput=output=>{output.workerResult.pid=output.pid+1;observed={brokerPid:output.pid,workerPid:output.workerResult.pid};};
+ const text='T32仅合成PID错配写后保留',args={requestId:'t32_pid_only_once',...f.binding,area:'outputs',relativePath:'pid-mismatch.txt',text};
+ await assert.rejects(()=>f.store.as(f.identity).invoke('write_task_file',args),error('FILE_OS_TOKEN_INVALID'));
+ const target=path.join(f.task.workspace.outputs,'files/pid-mismatch.txt'),hash=sha256(Buffer.from(text));assert.equal(fs.readFileSync(target,'utf8'),text);
+ const writes=f.store.list('file_write').filter(value=>value.taskId===f.binding.taskId&&value.sha256===hash);assert.equal(writes.length,1);assert.equal(writes[0].state,'unknown');assert.notEqual(observed.brokerPid,observed.workerPid);
+ const before=f.counters.syntheticRun,replay=await f.store.as(f.identity).invoke('write_task_file',args);assert.equal(replay.state,'unknown');assert.equal(replay.deduplicated,true);assert.equal(f.counters.syntheticRun,before);assert.equal(sha256(fs.readFileSync(target)),hash);
+ t32Observation(f,'O4_pid_write',{simulatedPids:observed,fileSha256:hash,fileRetained:true,fileWriteState:writes[0].state,replayState:replay.state,replayDeduplicated:true,replayWorkerRunDelta:0});
+ }finally{f.close();}});
+test('T32 O6 实际序列化请求帧不携带合成DB路径或lease秘密',async()=>{const f=await fixture();try{
+ f.store.fileWorker=f.backend;const token=Buffer.from(sha256(f.store.dbPath+':T32-frame'),'hex').toString('base64url'),executionId='t32_private_frame';assert.equal(token.length,43);
+ f.store.tx(()=>f.store.put('execution',executionId,{executionId,...f.binding,targetId:f.identity.instanceId,assignmentRevision:f.task.assignmentRevision,workspaceBinding:f.task.workspace.markerSha256,state:'worker_ready',deadline:Date.now()+60000,leaseHash:sha256(token),evidenceLevel:'local_test',platformProcessStarted:false}));
+ const directory=path.join(f.task.workspace.cwd,'.os-worker'),before=new Set(fs.readdirSync(directory)),files=executionFiles(f.store,executionId,token);files.write({area:'outputs',relativePath:'frame-privacy.txt',text:'T32仅合成帧内容'});
+ const requests=fs.readdirSync(directory).filter(name=>/^request-.*\.json$/.test(name)&&!before.has(name));assert.equal(requests.length,1);const requestPath=path.join(directory,requests[0]),bytes=fs.readFileSync(requestPath),frame=JSON.parse(bytes);
+ assert.deepEqual(Object.keys(frame).sort(),['ExpectedInspection','ExpectedSid','Operation','Target','Text']);assert.equal(frame.Operation,'write');assert.equal(frame.Target,path.join(f.task.workspace.outputs,'files/frame-privacy.txt'));assert.deepEqual(frame.ExpectedInspection,JSON.parse(fs.readFileSync(f.manifestFile)).inspection);assert.equal(frame.Text,'T32仅合成帧内容');assert.equal(frame.ExpectedSid,f.worker.bindings.get(f.task.workspace.taskId).sid);
+ function checkStringLeaves(value){let count=0;if(typeof value==='string'){for(const secret of [f.store.dbPath,token])assert.equal(value.includes(secret),false);return 1;}if(value&&typeof value==='object')for(const child of Object.values(value))count+=checkStringLeaves(child);return count;}
+ const checkedStringLeaves=checkStringLeaves(frame);assert.ok(checkedStringLeaves>0);
+ // 先JSON往返再检测，证明Windows反斜杠转义和嵌套值不会掩盖泄漏。
+ const memoryLeaks=[{Text:f.store.dbPath},{ExpectedSid:token},{ExpectedInspection:{nested:[f.store.dbPath]}}];for(const injected of memoryLeaks)assert.throws(()=>checkStringLeaves(JSON.parse(JSON.stringify(injected))),assert.AssertionError);
+ for(const name of ['dbPath','token','credentialFile','collaboration'])assert.equal(Object.hasOwn(frame,name),false);
+ t32Observation(f,'O6_frame',{requestPath,requestSha256:sha256(bytes),requestByteLength:bytes.length,fieldNames:Object.keys(frame).sort(),syntheticDbPathFound:false,syntheticLeaseSecretFound:false,syntheticLeaseSecretSha256:sha256(token),fixedFieldsOnly:true,checkedStringLeaves,memoryLeakVariantsRejected:memoryLeaks.length,textAndExpectedSidExact:true});
+ }finally{f.close();}});
