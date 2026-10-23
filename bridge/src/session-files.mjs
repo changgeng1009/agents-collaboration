@@ -27,18 +27,26 @@ export function readBoundedFile(file, limit = SESSION_FILE_LIMIT) {
   sessionPath(file); const before = fs.lstatSync(file, { bigint: true }); ordinary(before);
   if (before.size > BigInt(limit)) fail('FILE_TOO_LARGE', '文件超过有界读取上限。');
   const fd = fs.openSync(file, 'r');
+  let opened = null, afterDescriptor = null, afterPath = null;
   try {
-    const opened = fs.fstatSync(fd, { bigint: true }); ordinary(opened);
+    opened = fs.fstatSync(fd, { bigint: true }); ordinary(opened);
     if (!same(statId(before), statId(opened)) || before.size !== opened.size || before.mtimeNs !== opened.mtimeNs) fail('FILE_REPLACED', '文件打开时身份变化。');
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) { const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset); if (!count) fail('FILE_CHANGED', '文件读取未完成。'); offset += count; }
     sessionPath(file);
-    for (const after of [fs.fstatSync(fd, { bigint: true }), fs.lstatSync(file, { bigint: true })]) {
+    afterDescriptor = fs.fstatSync(fd, { bigint: true }); afterPath = fs.lstatSync(file, { bigint: true });
+    for (const after of [afterDescriptor, afterPath]) {
       ordinary(after);
       if (!same(statId(opened), statId(after)) || opened.size !== after.size || opened.mtimeNs !== after.mtimeNs) fail('FILE_CHANGED', '文件读取时发生变化。');
     }
     return { bytes, identity: statId(opened), sha256: sha256(bytes), byteLength: bytes.length };
+  } catch (error) {
+    if (['FILE_CHANGED', 'FILE_REPLACED'].includes(error.code)) {
+      const metadata = stat => stat ? { ...statId(stat), size: String(stat.size), mtimeNs: String(stat.mtimeNs) } : null;
+      Object.defineProperty(error, 'fileReadObservation', { value: { file, before: metadata(before), opened: metadata(opened), afterDescriptor: metadata(afterDescriptor), afterPath: metadata(afterPath) }, configurable: true });
+    }
+    throw error;
   } finally { fs.closeSync(fd); }
 }
 export function verifyFileWorkspace(workspace) {

@@ -133,7 +133,7 @@ export async function executeControlledMarketLaunch(config,plan,input,claim,evid
    child.stdout.on('data',bytes=>{if(!accept(bytes,true))return;tail=Buffer.concat([tail,bytes]);let end;while((end=tail.indexOf(10))>=0){acceptLine(tail.subarray(0,end));tail=tail.subarray(end+1);}});
    child.stderr.on('data',bytes=>{if(accept(bytes))stderr.push(bytes);});child.stdin.on('error',error=>{note('stdin_error',{code:error.code??'STDIN_ERROR'});protocolError=true;terminate('STDIN_WRITE_UNKNOWN');});
    timer=setTimeout(()=>{timedOut=true;terminate(stdin.attempted?'TIMEOUT_UNKNOWN':'CONTROLLED_READINESS_TIMEOUT');},plan.timeoutMs);
-   logPoll=setInterval(()=>{if(!pid||failure||stdin.attempted)return;try{const proof=observeControlledReadiness(config.base.profileRoot,logBaseline,pid);if(!proof)return;const current=prepare(request),currentInput=buildControlledMarketInput(current,request.text);if(current.launchSha256!==plan.launchSha256||currentInput.sha256!==input.sha256||pinned(plan.approvalPin,16384).sha256!==plan.approvalPin.sha256)fail('CONTROLLED_PREINPUT_CHANGED','输入前计划或批准发生变化。');readiness.verified=true;readiness.proof=proof;readiness.observedAt=new Date().toISOString();stdin.attempted=true;stdin.attemptedAt=new Date().toISOString();stdin.monotonicNs=process.hrtime.bigint().toString();note('stdin_write',{sha256:input.sha256,byteLength:input.byteLength});child.stdin.end(input.bytes,()=>{stdin.writeCompleted=true;stdin.completedAt=new Date().toISOString();});}catch(error){terminate(error.code??'CONTROLLED_READINESS_INVALID');}},50);
+   logPoll=setInterval(()=>{if(!pid||failure||stdin.attempted)return;let stage='observe_profile_logs';try{const proof=observeControlledReadiness(config.base.profileRoot,logBaseline,pid);if(!proof)return;stage='recheck_prepared_plan';const current=prepare(request),currentInput=buildControlledMarketInput(current,request.text);stage='recheck_phase_approval';if(current.launchSha256!==plan.launchSha256||currentInput.sha256!==input.sha256||pinned(plan.approvalPin,16384).sha256!==plan.approvalPin.sha256)fail('CONTROLLED_PREINPUT_CHANGED','输入前计划或批准发生变化。');readiness.verified=true;readiness.proof=proof;readiness.observedAt=new Date().toISOString();stdin.attempted=true;stdin.attemptedAt=new Date().toISOString();stdin.monotonicNs=process.hrtime.bigint().toString();note('stdin_write',{sha256:input.sha256,byteLength:input.byteLength});child.stdin.end(input.bytes,()=>{stdin.writeCompleted=true;stdin.completedAt=new Date().toISOString();});}catch(error){readiness.failure={stage,code:error.code??'CONTROLLED_READINESS_INVALID',fileReadObservation:error.fileReadObservation??null};note('readiness_error',readiness.failure);terminate(readiness.failure.code);}},50);
    closed=await completed;clearInterval(logPoll);clearTimeout(timer);if(tail.length)acceptLine(tail);
    if(!readiness.verified)failure??='CONTROLLED_READINESS_MISSING';if(!stdin.writeCompleted)failure??='STDIN_WRITE_UNKNOWN';
    try{audit=readCodeBuddyAudit(plan.auditFile,{cwd:plan.cwd,cliPid:pid,toolNames:MARKET_TASK_TOOLS});}catch(error){auditError=error.code??'MCP_AUDIT_UNVERIFIED';}
@@ -170,16 +170,45 @@ function claimControlledLaunch(plan,input,approval,evidenceLevel){
  try{writeExclusive(intentFile,intent);}catch(error){if(error.code!=='EEXIST')throw error;const original=read(intentFile);if(original.turnId!==plan.turnId)fail('CONTROLLED_PHASE_RESERVED','该阶段已有意图，禁止换编号重复启动。');if(!same(original,intent))fail('CONTROLLED_REQUEST_CONFLICT','已有意图的准确计划、输入或批准发生变化。');return{replay:fs.existsSync(resultFile)?{...read(resultFile),deduplicated:true}:{contract:CONTRACT,status:'unknown',reason:'LAUNCH_UNCONFIRMED',turnId:plan.turnId,nativeBinding:null,deduplicated:true,automaticRetry:false,safeToRetryOriginal:false}};}
  return{intentFile,resultFile};
 }
+const logStatValue=stat=>stat?{dev:String(stat.dev),ino:String(stat.ino),birthtimeNs:String(stat.birthtimeNs),size:String(stat.size),mtimeNs:String(stat.mtimeNs)}:null;
+// 活跃日志只核同一文件的稳定前缀；固定包、批准和任务输入仍走严格readBoundedFile。
+function readReadinessLogPrefix(file,limit=2*1024*1024){
+ sessionPath(file);const before=fs.lstatSync(file,{bigint:true});
+ const ordinary=stat=>{if(!stat.isFile()||stat.nlink!==1n)fail('FILE_IDENTITY_INVALID','就绪日志必须为单硬链接普通文件。');};
+ const sameIdentity=(left,right)=>left.dev===right.dev&&left.ino===right.ino&&left.birthtimeNs===right.birthtimeNs;
+ ordinary(before);if(before.size>BigInt(limit))fail('FILE_TOO_LARGE','就绪日志超过有界读取上限。');
+ const fd=fs.openSync(file,'r');let opened=null,afterDescriptor=null,afterPath=null;
+ try{
+  opened=fs.fstatSync(fd,{bigint:true});ordinary(opened);
+  if(!sameIdentity(before,opened)||opened.size<before.size)fail('FILE_REPLACED','就绪日志打开时身份变化或长度缩短。');
+  if(opened.size>BigInt(limit))fail('FILE_TOO_LARGE','就绪日志超过有界读取上限。');
+  if(opened.size===before.size&&opened.mtimeNs!==before.mtimeNs)fail('FILE_CHANGED','就绪日志在无增长时发生修改。');
+  const readPrefix=()=>{const bytes=Buffer.alloc(Number(opened.size));let offset=0;while(offset<bytes.length){const count=fs.readSync(fd,bytes,offset,bytes.length-offset,offset);if(!count)fail('FILE_CHANGED','就绪日志前缀读取未完成。');offset+=count;}return bytes;};
+  const bytes=readPrefix(),verified=readPrefix();
+  if(!bytes.equals(verified))fail('FILE_CHANGED','就绪日志已读前缀发生变化。');
+  sessionPath(file);afterDescriptor=fs.fstatSync(fd,{bigint:true});afterPath=fs.lstatSync(file,{bigint:true});
+  for(const after of[afterDescriptor,afterPath]){ordinary(after);if(!sameIdentity(opened,after))fail('FILE_REPLACED','就绪日志读取期间被替换。');if(after.size<opened.size||after.size===opened.size&&after.mtimeNs!==opened.mtimeNs)fail('FILE_CHANGED','就绪日志截断或发生非追加修改。');if(after.size>BigInt(limit))fail('FILE_TOO_LARGE','就绪日志超过有界读取上限。');}
+  // 尚未写完的末行不用于就绪判断，避免把半条标记提前当作完整宿主信号。
+  const end=bytes.lastIndexOf(10)+1,complete=bytes.subarray(0,end);
+  return{bytes:complete,byteLength:complete.length,sha256:sha256(complete),readObservation:{file,before:logStatValue(before),opened:logStatValue(opened),afterDescriptor:logStatValue(afterDescriptor),afterPath:logStatValue(afterPath),sampledByteLength:bytes.length,completePrefixBytes:complete.length,prefixRechecked:true,appendOnlyGrowthObserved:afterPath.size>opened.size}};
+ }catch(error){
+  // 诊断采样失败不能覆盖首个保护错误；路径重新过门禁后才取元数据，不读正文。
+  try{afterDescriptor??=fs.fstatSync(fd,{bigint:true});}catch{}
+  try{sessionPath(file);afterPath??=fs.lstatSync(file,{bigint:true});}catch{}
+  Object.defineProperty(error,'fileReadObservation',{value:{file,before:logStatValue(before),opened:logStatValue(opened),afterDescriptor:logStatValue(afterDescriptor),afterPath:logStatValue(afterPath)},configurable:true});throw error;
+ }
+ finally{fs.closeSync(fd);}
+}
 function profileLogFiles(profileRoot){const root=sessionPath(path.join(profileRoot,'logs'),false);if(!fs.existsSync(root))return[];const files=[];for(const date of fs.readdirSync(root,{withFileTypes:true})){if(!/^\d{4}-\d{2}-\d{2}$/.test(date.name)||!date.isDirectory())continue;const folder=sessionPath(path.join(root,date.name));for(const entry of fs.readdirSync(folder,{withFileTypes:true})){if(!entry.isFile()||!entry.name.endsWith('.log'))continue;files.push(sessionPath(path.join(folder,entry.name)));if(files.length>256)fail('CONTROLLED_LOG_LIMIT','就绪日志来源超过有限范围。');}}return files;}
 function profileLogSnapshot(profileRoot){return new Map(profileLogFiles(profileRoot).map(file=>{const stat=fs.statSync(file,{bigint:true});return[file,{size:Number(stat.size),ino:String(stat.ino),dev:String(stat.dev)}];}));}
-function observeControlledReadiness(profileRoot,baseline,pid){
+export function observeControlledReadiness(profileRoot,baseline,pid){
  for(const file of profileLogFiles(profileRoot)){
   const previous=baseline.get(file),stat=fs.statSync(file,{bigint:true});if(previous&&(previous.ino!==String(stat.ino)||previous.dev!==String(stat.dev)||Number(stat.size)<previous.size))fail('CONTROLLED_LOG_CHANGED','既有日志身份或前缀边界改变。');if(Number(stat.size)===(previous?.size??0))continue;
-  const read=readBoundedFile(file,2*1024*1024),start=previous?.size??0,text=read.bytes.subarray(start).toString('utf8'),lines=text.split(/\r?\n/).filter(line=>line.includes(`[pid=${pid}]`));
+  const read=readReadinessLogPrefix(file),start=previous?.size??0,text=read.bytes.subarray(start).toString('utf8'),lines=text.split(/\r?\n/).filter(line=>line.includes(`[pid=${pid}]`));
   const component=lines.findIndex(line=>line.includes('Loaded plugin components for content-creator@inline: 1 agent(s), 0 command(s), 5 skill(s), 0 hook(s), 0 MCP server(s), 0 LSP server(s), 0 output style(s)')),overlay=lines.findIndex(line=>line.includes('Settings agent: applied "content-creator" config (instructions/tools) onto default agent "cli"')),refresh=lines.findIndex(line=>line.includes('[PluginRuntime] refresh completed (startup), active=1, changed=true'));
   if(component<0||overlay<=component||refresh<=overlay)continue;
   if(lines.slice(component).some(line=>/\[PluginRuntime\].*(?:failed|degraded)|Settings agent:.*(?:not found|failed)/i.test(line)))fail('CONTROLLED_READINESS_DEGRADED','原插件或Agent在准入前发生降级。');
-  return{file,startOffset:start,endOffset:read.byteLength,observedPrefixSha256:read.sha256,newBytesSha256:sha256(read.bytes.subarray(start)),cliPid:pid,componentLine:component+1,overlayLine:overlay+1,refreshLine:refresh+1,evidence:'same_process_host_configuration_only',providerBodyVerified:false};
+  return{file,startOffset:start,endOffset:read.byteLength,observedPrefixSha256:read.sha256,newBytesSha256:sha256(read.bytes.subarray(start)),cliPid:pid,componentLine:component+1,overlayLine:overlay+1,refreshLine:refresh+1,readObservation:read.readObservation,evidence:'same_process_host_configuration_only',providerBodyVerified:false};
  }return null;
 }
 function controlledReceipt(events,options){

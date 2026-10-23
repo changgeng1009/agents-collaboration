@@ -74,6 +74,7 @@ export const PUBLIC_FILES = [
   'tests/market-plugin-loading.integration.mjs',
   'bridge/src/market-controlled-adapter.mjs',
   'tests/market-controlled.integration.mjs',
+  'tests/market-readiness-log.integration.mjs',
   'tests/market-expert-inspection.integration.mjs',
   'tests/market-expert-protocol-fixture.mjs',
   'bridge/src/collaboration-file-boundary.mjs',

@@ -146,6 +146,7 @@
 !/bridge/src/content-quality.mjs
 !/bridge/src/content-media-worker.mjs
 !/tests/market-controlled.integration.mjs
+!/tests/market-readiness-log.integration.mjs
 !/tests/collaboration-content.integration.mjs
 !/tests/content-quality.integration.mjs
 !/tests/content-media.integration.mjs

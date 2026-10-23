@@ -1,11 +1,12 @@
 {
   "name": "independent-agent-collaboration",
-  "version": "0.2.22",
+  "version": "0.2.23",
   "private": true,
   "type": "module",
   "description": "独立多成员协作核心及兼容本地通信桥",
   "engines": { "node": ">=24.0.0" },
   "scripts": {
+    "test:market-readiness": "\"%npm_node_execpath%\" --test ../tests/market-readiness-log.integration.mjs",
     "test:transcript-timing": "\"%npm_node_execpath%\" --test ../tests/content-transcript-timing.integration.mjs",
     "test:workbuddy-localassistant": "\"%npm_node_execpath%\" --test ../tests/workbuddy-localassistant-provider.integration.mjs",
     "test:workbuddy-history": "\"%npm_node_execpath%\" --test ../tests/workbuddy-history-content.integration.mjs",
