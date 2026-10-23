@@ -196,3 +196,5 @@
 !/tests/task-file-worker-restore.integration.mjs
 !/tests/task-file-lease-backend.integration.mjs
 !/tests/task-file-lease-backend.fixture.mjs
+!/tests/market-text-revision.fixture.mjs
+!/tests/market-text-revision.integration.mjs

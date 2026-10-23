@@ -1,0 +1,33 @@
+// 仅构造合成文件；导入本模块不运行测试、服务或子进程。
+import fs from 'node:fs';import path from 'node:path';import {createHash,randomUUID} from 'node:crypto';
+import {buildControlledMarketPlan} from '../bridge/src/market-controlled-adapter.mjs';
+import {MARKET_BUILTIN_DENY_TOOLS,MARKET_TASK_TOOLS} from '../bridge/src/market-expert-adapter.mjs';
+import {preparedRootIdentity} from '../bridge/src/collaboration-workspaces.mjs';
+export const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+export const fixturePin=file=>({path:file,sha256:digest(fs.readFileSync(file))});
+export function fixtureWrite(file,value){fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,typeof value==='string'||Buffer.isBuffer(value)?value:JSON.stringify(value,null,2)+'\n');return file;}
+const tree=dir=>fs.readdirSync(dir,{withFileTypes:true}).flatMap(item=>item.isDirectory()?tree(path.join(dir,item.name)).map(row=>({...row,relativePath:item.name+'/'+row.relativePath})):[{relativePath:item.name,sha256:fixturePin(path.join(dir,item.name)).sha256}]);
+export function createTextRevisionFixture(root,{id='text_fixture',nodeExecutable=process.execPath,headlessSource='// synthetic; never executed',cwd=path.join(root,'task-workspaces',id),member=null}={}){
+ const dir=path.join(root,'bridge/runtime/private-tools',id),pkg=path.join(dir,'package'),plugin=path.join(dir,'plugin'),profile=path.join(dir,'profile');
+ for(const p of[profile,path.join(cwd,'inputs/files')])fs.mkdirSync(p,{recursive:true});
+ const write=(relative,value)=>fixtureWrite(path.join(dir,relative),value);
+ write('package/package.json',{name:'@tencent-ai/codebuddy-code',version:'2.168.2',type:'module',bin:{codebuddy:'bin/codebuddy'}});write('package/bin/codebuddy','// synthetic');write('package/dist/codebuddy-headless.js',headlessSource);write('package/product.json',{models:[{id:'deepseek-v4.1-flash',supportsImages:true,supportsToolCall:true}]});
+ write('plugin/.codebuddy-plugin/plugin.json',{name:'content-creator',version:'1.0.1',agentName:'content-creator',expertType:'agent',agents:['./agents/content-creator.md']});write('plugin/agents/content-creator.md','---\nname: content-creator\ndescription: 合成专家\n---\n仅用于合成测试。');
+ const catalogPin=fixturePin(write('catalog.json',[{path:'/api/v1/jobs/dispatch-context',status:200,body:{data:{agents:[{name:'content-creator',custom:true,source:'project',description:'合成 (content-creator@inline:agents)'}]}}}]));
+ const sourcePolicyPin=fixturePin(write('policy.json',{schema:'market_c_sources_v1',headlessSha256:fixturePin(path.join(pkg,'dist/codebuddy-headless.js')).sha256,productSha256:fixturePin(path.join(pkg,'product.json')).sha256,toolNames:MARKET_BUILTIN_DENY_TOOLS,taskTools:MARKET_TASK_TOOLS.map(name=>'mcp__market_task__'+name),sourcePins:[catalogPin],registryPins:[]}));
+ const base={enabled:true,modelId:'deepseek-v4.1-flash',nodeExecutable,nodeSha256:fixturePin(nodeExecutable).sha256,packageRoot:pkg,runtimeVersion:'2.168.2',runtimePins:tree(pkg),pluginRoot:plugin,pluginName:'content-creator',pluginVersion:'1.0.1',agentName:'content-creator',pluginPins:tree(plugin),profileRoot:profile,profileIdentity:preparedRootIdentity(profile),cwd,cwdIdentity:preparedRootIdentity(cwd),member:member??{endpoint:'http://127.0.0.1:9/mcp',credentialFile:path.join(root,'bridge/runtime/collaboration-core/fixture/member.key'),instanceId:'fixture_expert',groupId:'fixture_group',taskId:'fixture_task',inputPaths:['manager-brief.json']},timeoutMs:300000,maxOutputBytes:2097152};
+ const market={base,catalogPin,sourcePolicyPin,frames:[],approvals:{first:null,second:null}},plan=buildControlledMarketPlan(market,{turnId:'original_'+id,phase:'first'}),briefFile=path.join(cwd,'inputs/files/manager-brief.json');
+ if(!fs.existsSync(briefFile))fixtureWrite(briefFile,JSON.stringify({schema:'synthetic_brief',text:'合成事实与素材。'}));
+ const briefPin=fixturePin(briefFile),sessionId='synthetic_success_'+id,text=JSON.stringify({schema:'synthetic_draft',text:'只测试精确文字续接，不代表真实专家成果。'}),artifactId='artifact_'+id;
+ const stable=digest(JSON.stringify({contract:'content_expert_stages_v1',base:plan.bindingContext.validatedBaseContextSha256,catalog:catalogPin.sha256,sourcePolicy:sourcePolicyPin.sha256,briefSha256:briefPin.sha256}));
+ const priorSubmitToolUseId='synthetic_call_'+randomUUID(),oldSubmit={groupId:base.member.groupId,taskId:base.member.taskId,requestId:'old_submit_'+id,sourceIds:[],text};
+ const streamFile=path.join(cwd,'work/market-control','original_'+id,'native-stream.jsonl');
+ fixtureWrite(streamFile,[{type:'system',subtype:'init',session_id:sessionId,model:base.modelId,cwd},{type:'assistant',session_id:sessionId,message:{model:base.modelId,content:[{type:'tool_use',name:'mcp__market_task__start_task',input:{requestId:'old_start_'+id}},{type:'tool_use',id:priorSubmitToolUseId,name:'mcp__market_task__submit_task_result',input:oldSubmit}]}},{type:'result',subtype:'success',is_error:false,session_id:sessionId}].map(row=>JSON.stringify(row)).join('\n')+'\n');
+ const prior={contract:'content_expert_stages_v1',stage:'script',turnId:'original_'+id,status:'succeeded',evidenceLevel:'local_test',streamFile,stableBindingSha256:stable,inputContextSha256:digest(Buffer.from('synthetic_script_context')),inputSubjectVersionId:null,nativeBinding:{contract:'content_expert_stages_v1',sessionId,nativeFieldName:'session_id',modelId:base.modelId,bindingSha256:plan.bindingSha256,status:'succeeded',evidenceLevel:'local_test',stableBindingSha256:stable},actualTaskReadAndSubmitObserved:true,audit:{verified:true}};
+ const priorReceiptPin=fixturePin(fixtureWrite(path.join(cwd,'work/content_expert_stages_v1/script-result.json'),prior));
+ const artifact={artifactId,groupId:base.member.groupId,taskId:base.member.taskId,authorId:base.member.instanceId,text,sha256:digest(Buffer.from(text)),byteLength:Buffer.byteLength(text)};
+ const artifactReceiptPin=fixturePin(write('artifact-receipt.json',{tool:'get_artifact',isError:false,structuredContent:{artifact}}));
+ const reviewPin=fixturePin(write('review.json',{artifactSha256:artifact.sha256,issues:[{id:'Q1',requiredChange:'仅修订指定句并重新估排。'}]})),instructionsPin=fixturePin(write('instructions.txt','仅做文字定向修订，保留通过事实与素材，交变更表及估排；不得生成媒体。'));
+ const context={schema:'market_text_revision_inputs_v1',priorReceiptPin,priorStreamPin:fixturePin(streamFile),artifactReceiptPin,briefPin,reviewPin,instructionsPin,requestIds:{start:'revision_start_'+id,submit:'revision_submit_'+id}},contextPin=fixturePin(write('context.json',context));
+ return{dir,cwd,market,context,contextPin,sessionId,artifact,prior,priorSubmitToolUseId,write,turnId:'revision_'+id};
+}
