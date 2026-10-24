@@ -7,6 +7,7 @@ try {
  const configFile=values.config ?? process.env.QWEN_MEDIA_HOST_CONFIG;
  const adapter=new QwenMediaAdapter(loadQwenConfig(configFile));let result;
  switch(positionals[0]) {
+  case 'plan':result=adapter.planRequest(adapter.readRequest(values.request));break;
   case 'preflight':result=adapter.preflight(values.request?adapter.readRequest(values.request):null);break;
   case 'readonly-plan':{const plan=adapter.readonlyPlan();result={plan,planSha256:readonlyPlanSha256(plan)};break;}
   case 'readonly-auth':result=await adapter.readonlyAuth(values.kind,values.review);break;
@@ -14,6 +15,8 @@ try {
   case 'status':result=await adapter.status(values.operation,values.query,{recover:values.recover});break;
   case 'recover-plan':result=adapter.recoveryPlan(adapter.readRequest(values.request));break;
   case 'recover':result=await adapter.recover(adapter.readRequest(values.request));break;
+  case 'audio-recover-plan':result=adapter.audioRecoveryPlan(adapter.readRequest(values.request));break;
+  case 'audio-recover':result=await adapter.recoverAudio(adapter.readRequest(values.request));break;
   default:throw Object.assign(new Error(),{code:'QWEN_COMMAND_INVALID'});
  }
  process.stdout.write(JSON.stringify(result,null,2)+'\n');

@@ -7,6 +7,7 @@ import {downloadPinnedSource,validateSourceUrl,isPublicIPv4} from './content-dow
 import {validateDownloadProxy} from './content-download-proxy.mjs';
 import {createLoopbackAgent,validateLoopbackProxy,LOOPBACK_PROXY_ERROR_CODES} from './qwen-loopback-connect.mjs';
 import {collectFailureDiagnostic,containsCredentialMaterial} from './qwen-error-diagnostics.mjs';
+import {QWEN_AUDIO_TTS,QWEN_AUDIO_TTS_PRICE,validateAudioTtsBody,audioTtsUsage,audioTtsExpiry,inspectAudioTtsWav,redactAudioTtsResponse} from './qwen-audio-tts.mjs';
 
 export const QWEN_ORIGIN = 'https://maas.qianwenaiapi.com';
 export const QWEN_MODELS = Object.freeze({video:'MiniMax/MiniMax-H3', speech:'MiniMax/speech-2.8-hd'});
@@ -88,7 +89,10 @@ export function validateApiRequest({method,url,body}) {
  requireThat(parsed.origin===QWEN_ORIGIN && !parsed.username && !parsed.password && !parsed.hash && parsed.port==='', 'QWEN_ENDPOINT_FORBIDDEN');
  const list=parsed.pathname+parsed.search===LIST_PATH;
  const query=/^\/api\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(parsed.pathname) && !parsed.search;
- requireThat(method==='POST' && Object.values(POST_PATHS).includes(parsed.pathname) && !parsed.search && body || method==='GET' && !body && (list || query),'QWEN_ENDPOINT_FORBIDDEN');
+ const audioTts=parsed.pathname===QWEN_AUDIO_TTS.pathname;
+ requireThat(method==='POST' && (Object.values(POST_PATHS).includes(parsed.pathname) || audioTts) && !parsed.search && body || method==='GET' && !body && (list || query),'QWEN_ENDPOINT_FORBIDDEN');
+ if(audioTts)validateAudioTtsBody(body);
+ if(body?.model===QWEN_AUDIO_TTS.model)requireThat(audioTts,'QWEN_ENDPOINT_FORBIDDEN');
  return parsed;
 }
 export async function nativeQwenTransport(request) {
@@ -124,11 +128,12 @@ export async function qwenNetworkPreflight({hostname=new URL(QWEN_ORIGIN).hostna
 }
 
 export class QwenMediaAdapter {
- #config; #transport; #binding; #base; #coreVerifier; #download;
- constructor(config,{transport=nativeQwenTransport,verifyCoreBinding=null,download=downloadPinnedSource}={}) {
+ #config; #transport; #binding; #base; #coreVerifier; #download; #credentialReader;
+ constructor(config,{transport=nativeQwenTransport,verifyCoreBinding=null,download=downloadPinnedSource,credentialReader=readCredential}={}) {
   this.#config=structuredClone(config);this.#transport=transport;
-  this.#coreVerifier=verifyCoreBinding;this.#download=download;
+  this.#coreVerifier=verifyCoreBinding;this.#download=download;this.#credentialReader=credentialReader;
   requireThat(config.schema==='qwen_media_host_v1' && config.origin===QWEN_ORIGIN && config.models?.video===QWEN_MODELS.video && config.models?.speech===QWEN_MODELS.speech,'QWEN_CONFIG_INVALID');
+  if(config.qwenAudioTts!==undefined)requireThat(exact(config.qwenAudioTts,['enabled','model','voice']) && config.qwenAudioTts.enabled===true && config.qwenAudioTts.model===QWEN_AUDIO_TTS.model && config.qwenAudioTts.voice===QWEN_AUDIO_TTS.voice,'QWEN_AUDIO_TTS_CONFIG_INVALID');
   if(config.network?.proxy)validateLoopbackProxy(config.network.proxy);
   this.#binding=jsonFile(config.bindingFile,32768);
   requireThat(digest(readOrdinary(config.bindingFile,32768))===config.bindingSha256,'QWEN_BINDING_CHANGED');
@@ -169,9 +174,18 @@ export class QwenMediaAdapter {
   try{fs.mkdirSync(dir);}catch(failure){if(failure.code==='EEXIST')return null;throw error('QWEN_RESERVE_UNKNOWN');}
   writeJson(path.join(dir,'intent.json'),value);return dir;
  }
- #token(kind) {requireThat(['video','speech'].includes(kind),'QWEN_KIND_INVALID');return readCredential(this.#config.credentials?.[kind]?.credentialFile);}
+ #token(kind) {requireThat(['video','speech','qwenAudioTts'].includes(kind),'QWEN_KIND_INVALID');return this.#credentialReader(this.#config.credentials?.[kind]?.credentialFile);}
  #request(kind,input) {
   requireThat(['video','speech'].includes(kind),'QWEN_KIND_INVALID');
+  if(input?.model===QWEN_AUDIO_TTS.model) {
+   requireThat(kind==='speech' && this.#config.qwenAudioTts?.enabled===true && exact(input,['operationId','kind','model','input','parameters','source']) && id(input.operationId) && input.kind===kind && exact(input.parameters,[]),'QWEN_AUDIO_TTS_REQUEST_INVALID');
+   const body=validateAudioTtsBody({model:input.model,input:input.input}),s=input.source;
+   requireThat(exact(s,['area','relativePath','sha256']) && s.area==='inputs' && /^[a-f0-9]{64}$/.test(s.sha256),'QWEN_AUDIO_TTS_SOURCE_INVALID');
+   const bytes=readOrdinary(this.#target('inputs',s.relativePath));requireThat(digest(bytes)===s.sha256,'QWEN_AUDIO_TTS_SOURCE_CHANGED');
+   let source;try{source=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw error('QWEN_AUDIO_TTS_SOURCE_INVALID');}
+   validateAudioTtsBody(source);requireThat(canonical(source)===canonical(body),'QWEN_AUDIO_TTS_SOURCE_CHANGED');
+   return structuredClone(body);
+  }
   requireThat(exact(input,['operationId','kind','input','parameters']) && id(input.operationId) && input.kind===kind,'QWEN_REQUEST_INVALID');
   if(kind==='video') {
    requireThat(exact(input.input,['prompt'],['media']) && typeof input.input.prompt==='string' && [...input.input.prompt].length>0 && [...input.input.prompt].length<=7000,'QWEN_REQUEST_INVALID');
@@ -197,16 +211,22 @@ export class QwenMediaAdapter {
  readRequest(relativePath) {return jsonFile(this.#target('inputs',relativePath),1048576);}
  planRequest(request) {
   this.verify();const body=this.#request(request.kind,request);
+  if(body.model===QWEN_AUDIO_TTS.model) {
+   const plan={schema:'qwen_audio_tts_plan_v1',taskId:this.#binding.taskId,taskRoot:this.#binding.taskRoot,bindingSha256:this.#config.bindingSha256,effectivePolicySha256:this.#audioPolicySha256(),directories:this.#binding.directories,operationId:request.operationId,kind:'speech',model:body.model,endpoint:QWEN_ORIGIN+QWEN_AUDIO_TTS.pathname,body,requestSha256:digest(JSON.stringify(request)),bodySha256:digest(canonical(body)),inputSource:structuredClone(request.source),voice:body.input.voice,textSha256:digest(body.input.text),instructionSha256:digest(body.input.instruction),textCodePoints:[...body.input.text].length,pricing:QWEN_AUDIO_TTS_PRICE,credentialSlot:'qwenAudioTts',budgetSlot:'qwenAudioTts',credentialReads:0,networkRequests:0,executionAuthorized:false,automaticRetry:false};
+   return {...plan,planSha256:digest(canonical(plan))};
+  }
   return {operationId:request.operationId,kind:request.kind,body,model:body.model,requestSha256:digest(JSON.stringify(request)),bodySha256:digest(canonical(body)),endpoint:QWEN_ORIGIN+POST_PATHS[request.kind],units:request.kind==='video'?request.parameters.duration:[...request.input.text].reduce((n,c)=>n+(/\p{Unified_Ideograph}/u.test(c)?2:1),0)};
  }
  preflight(request=null) {
+  if(request?.model!==undefined)return {schema:'qwen_audio_tts_preflight_v1',plan:this.planRequest(request),credentials:{},credentialReads:0,networkRequests:0,generationEnabled:false};
   this.verify();const credentials={};for(const kind of ['video','speech']) {try{this.#token(kind);credentials[kind]={readable:true,formatValid:true,authenticationVerified:false};}catch(failure){credentials[kind]={readable:false,formatValid:false,code:safeFailureCode(failure)};}}
   let plan=null;if(request){const body=this.#request(request.kind,request);plan={operationId:request.operationId,kind:request.kind,model:body.model,requestSha256:digest(JSON.stringify(request)),endpoint:QWEN_ORIGIN+POST_PATHS[request.kind],units:request.kind==='video'?request.parameters.duration:[...request.input.text].length};}
   return {schema:'qwen_media_preflight_v1',taskId:this.#binding.taskId,credentials,plan,networkRequests:0,networkMode:this.#config.network?.proxy?'loopback-connect':'direct',generationEnabled:false,osIsolationVerified:false,modelExecutionVerified:false,businessCompletedVerified:false};
  }
  readonlyPlan() {return {schema:'qwen_readonly_auth_v1',method:'GET',url:QWEN_ORIGIN+LIST_PATH,timeoutMs:15000,maxBodyBytes:1048576,maxRedirects:0,automaticRetry:false,maxRequestsPerCredential:1,maxRequestsTotal:2,requestBody:null,defaultTimeRangeHours:24,persistedFields:['credentialSlot','httpStatus','request_id','code','returnedCount','classification','authenticationAccepted','modelAccessVerified'],generationRequests:0};}
- async #call(request) {
+ async #call(request,onResponse=null) {
   validateApiRequest(request);this.verify();const response=await this.#transport({...request,proxy:this.#config.network?.proxy??null});this.verify();
+  if(onResponse)onResponse(response);
   requireThat(response && Number.isInteger(response.httpStatus) && response.body && typeof response.body==='object','QWEN_RESPONSE_UNKNOWN');
   requireThat(response.httpStatus<300 || response.httpStatus>=400,'QWEN_REDIRECT_FORBIDDEN');return response;
  }
@@ -226,26 +246,46 @@ export class QwenMediaAdapter {
  }
  async execute(request) {
   const body=this.#request(request.kind,request),kind=request.kind,requestSha256=digest(JSON.stringify(request)),approval=this.#config.generationApprovals?.[request.operationId];
+  const audioTts=body.model===QWEN_AUDIO_TTS.model,plan=audioTts?this.planRequest(request):null,budgetKind=audioTts?'qwenAudioTts':kind;
   requireThat(approval?.kind===kind && approval.requestSha256===requestSha256 && approval.maxRequests===1 && Date.parse(approval.expiresAt)>Date.now(),'QWEN_GENERATION_APPROVAL_REQUIRED');
+  if(audioTts)requireThat(approval.model===QWEN_AUDIO_TTS.model && approval.reviewedPlanSha256===plan.planSha256 && approval.billingAcknowledged===true,'QWEN_AUDIO_TTS_REVIEW_REQUIRED');
   const units=kind==='video'?request.parameters.duration:[...request.input.text].length;
-  requireThat(Number.isInteger(approval.maxUnits) && units<=approval.maxUnits,'QWEN_GENERATION_BUDGET_EXCEEDED');
-  const token=this.#token(kind),opDir=this.#reserve(`operation-${request.operationId}`,{operationId:request.operationId,kind,requestSha256,origin:QWEN_ORIGIN,at:new Date().toISOString(),automaticRetry:false});
+  const maxUnits=audioTts?approval.maxTextCodePoints:approval.maxUnits;
+  requireThat(Number.isInteger(maxUnits) && units<=maxUnits,'QWEN_GENERATION_BUDGET_EXCEEDED');
+  let token=audioTts?null:this.#token(kind);
+  const opDir=this.#reserve(`operation-${request.operationId}`,{operationId:request.operationId,kind,requestSha256,origin:QWEN_ORIGIN,...(audioTts?{model:body.model,reviewedPlanSha256:plan.planSha256,bindingSha256:this.#config.bindingSha256,inputSource:plan.inputSource}:{}),at:new Date().toISOString(),automaticRetry:false});
   if(!opDir)return {operationId:request.operationId,status:'reserved_or_finished',deduplicated:true,automaticRetry:false};
   const payloadSha256=digest(canonical({bindingSha256:this.#config.bindingSha256,kind,body}));
   if(!this.#reserve(`payload-${kind}-${payloadSha256}`,{operationId:request.operationId,requestSha256,payloadSha256}))return {status:'reserved_or_finished',deduplicated:true,automaticRetry:false};
-  const budget=this.#config.generationBudget?.[kind];requireThat(Number.isInteger(budget) && budget>=1 && budget<=100,'QWEN_GENERATION_BUDGET_EXCEEDED');
-  let slot=null;for(let n=1;n<=budget;n++){slot=this.#reserve(`budget-${kind}-${n}`,{operationId:request.operationId,requestSha256});if(slot)break;}
+  const budget=this.#config.generationBudget?.[budgetKind];requireThat(Number.isInteger(budget) && budget>=1 && budget<=100,'QWEN_GENERATION_BUDGET_EXCEEDED');
+  let slot=null;for(let n=1;n<=budget;n++){slot=this.#reserve(`budget-${budgetKind}-${n}`,{operationId:request.operationId,requestSha256});if(slot)break;}
   requireThat(slot,'QWEN_GENERATION_BUDGET_EXCEEDED');
-  let result={operationId:request.operationId,kind,origin:QWEN_ORIGIN,requestSha256,payloadSha256,requestedModel:QWEN_MODELS[kind],actualModelIdentity:null,actualModelIdentityVerified:false,status:'unknown',task_id:null,request_id:null,trace_id:null,automaticRetry:false,modelExecutionVerified:false,businessCompletedVerified:false};
+  let result={operationId:request.operationId,kind,origin:QWEN_ORIGIN,requestSha256,payloadSha256,requestedModel:body.model,actualModelIdentity:null,actualModelIdentityVerified:false,status:'unknown',task_id:null,request_id:null,trace_id:null,automaticRetry:false,modelExecutionVerified:false,businessCompletedVerified:false,...(audioTts?{reviewedPlanSha256:plan.planSha256,providerFinished:false,finish_reason:null,usage:{}}:{})};
   try {
-   const response=await this.#call({method:'POST',url:QWEN_ORIGIN+POST_PATHS[kind],body,token,async:kind==='video',maxBodyBytes:kind==='speech'?LIMIT:1048576,timeoutMs:kind==='speech'?120000:15000});
+   if(audioTts)token=this.#token('qwenAudioTts');
+   const response=await this.#call({method:'POST',url:QWEN_ORIGIN+(audioTts?QWEN_AUDIO_TTS.pathname:POST_PATHS[kind]),body,token,async:kind==='video',maxBodyBytes:kind==='speech'?LIMIT:1048576,timeoutMs:kind==='speech'?120000:15000},audioTts?response=>{
+    const file=path.join(opDir,'native-response.json'),pin=this.#save(file,redactAudioTtsResponse(response,token));
+    result.rawReceipt={area:'work',relativePath:path.relative(this.#area('work'),file).split(path.sep).join('/'),...pin};
+   }:null);
    const output=response.body.output;result.httpStatus=response.httpStatus;result.request_id=safeId(response.body.request_id,token);result.trace_id=safeId(output?.trace_id ?? response.body.trace_id,token);result.code=providerCode(response.body.code ?? output?.base_resp?.status_code,token);result.provider_code=result.code;
    if(kind==='video')result.task_id=safeId(output?.task_id,token);
    const diagnostic=this.#archiveFailure(opDir,response,token,kind,'execute',result);if(diagnostic)result.diagnostic=diagnostic;
    const returnedModel=response.body.model ?? output?.model;result.actualModelIdentity=reportedModel(returnedModel,token);
+   if(audioTts){result.usage=audioTtsUsage(response.body.usage);result.finish_reason=output?.finish_reason==='stop'?'stop':null;}
    if(kind==='video')result.task_id=safeId(output?.task_id,token);
-   requireThat(returnedModel===undefined || returnedModel===null || result.actualModelIdentity===QWEN_MODELS[kind],'QWEN_MODEL_MISMATCH');
+   requireThat(returnedModel===undefined || returnedModel===null || result.actualModelIdentity===body.model,'QWEN_MODEL_MISMATCH');
    if(response.httpStatus!==200) {result.status='http_error';}
+   else if(audioTts) {
+    requireThat(result.request_id && response.body.code===undefined && output?.finish_reason==='stop' && typeof output.audio?.url==='string' && output.audio.url.length>0 && (output.audio.data===undefined || output.audio.data===''),'QWEN_AUDIO_TTS_RESULT_UNKNOWN');
+    result.status='generated';result.providerFinished=true;result.mediaRecovery={status:'pending',automaticRetry:false};
+    try {
+     const url=new URL(output.audio.url);requireThat(url.href.length<=4096 && !containsCredentialMaterial(url.href,token),'QWEN_RESPONSE_SECRET_REJECTED');
+     const source={schema:'qwen_audio_tts_source_v1',taskId:this.#binding.taskId,bindingSha256:this.#config.bindingSha256,origin:QWEN_ORIGIN,operationId:request.operationId,request_id:result.request_id,requestedModel:body.model,actualModelIdentity:result.actualModelIdentity,reviewedPlanSha256:plan.planSha256,url:url.href,urlSha256:digest(url.href),hostname:url.hostname,audioExpiresAt:audioTtsExpiry(output.audio.expires_at),apiAuthenticationAllowedForDownload:false};
+     const sourceFile=path.join(opDir,'audio-source.json'),pin=this.#save(sourceFile,source);
+     result.sourceContract={area:'work',relativePath:path.relative(this.#area('work'),sourceFile).split(path.sep).join('/'),sha256:pin.sha256};
+     this.#audioDownloadSource(source);result.mediaHost=url.hostname;
+    }catch(failure){result.mediaRecovery={status:'blocked',code:safeFailureCode(failure),automaticRetry:false};}
+   }
    else if(kind==='video') {
     result.task_id=safeId(output?.task_id,token);result.task_status=['PENDING','RUNNING','SUCCEEDED','FAILED','CANCELED','UNKNOWN'].includes(output?.task_status)?output.task_status:null;
     requireThat(result.task_id && result.task_status,'QWEN_RESPONSE_UNKNOWN');result.status='submitted';
@@ -302,6 +342,64 @@ export class QwenMediaAdapter {
    this.#save(path.join(dir,'recovery-link.json'),mediaRecovery);return {...result,mediaRecovery,mediaRecoveryPending:mediaRecovery.status!=='succeeded',...(mediaRecovery.output?{output:mediaRecovery.output,modelExecutionVerified:true,technicalDecodeVerified:false}:{})};
   }
   return result;
+ }
+ // 音频回收只接受本任务持久化的最终响应，不复用H3导入或审批。
+ #audioPolicy() {
+  const policy=this.#config.audioRecovery;
+  requireThat(policy && Array.isArray(policy.allowedHosts) && policy.allowedHosts.length<=10 && policy.allowedHosts.every(host=>typeof host==='string' && /^[a-z0-9.-]+$/.test(host) && host.includes('.') && !host.includes('..')) && Number.isSafeInteger(policy.maxBytes) && policy.maxBytes>0 && policy.maxBytes<=LIMIT && Number.isSafeInteger(policy.timeoutMs) && policy.timeoutMs>0 && policy.timeoutMs<=120000 && Number.isInteger(policy.maxDownloads) && policy.maxDownloads>=0 && policy.maxDownloads<=100,'QWEN_AUDIO_RECOVERY_POLICY_REQUIRED');
+  if(policy.proxy)validateDownloadProxy(policy.proxy);
+  return policy;
+ }
+ #audioPolicySha256() {
+  const p=this.#config.audioRecovery===undefined?null:this.#audioPolicy();
+  // 摘要只绑定配置位置与有效策略，不读取/摘要凭据值；排除审批本身以免循环。
+  return digest(canonical({origin:this.#config.origin,profile:this.#config.qwenAudioTts,credentialFile:this.#config.credentials?.qwenAudioTts?.credentialFile??null,apiProxy:this.#config.network?.proxy??null,generationMaxRequests:this.#config.generationBudget?.qwenAudioTts??0,recovery:p?{allowedHosts:p.allowedHosts,maxBytes:p.maxBytes,timeoutMs:p.timeoutMs,maxDownloads:p.maxDownloads,proxy:p.proxy??null}:null}));
+ }
+ #audioDownloadSource(source) {
+  const policy=this.#audioPolicy();
+  const url=new URL(source.url);requireThat(url.protocol==='https:','QWEN_AUDIO_SOURCE_HTTPS_REQUIRED');
+  requireThat(policy.allowedHosts.includes(url.hostname),'QWEN_AUDIO_SOURCE_HOST_FORBIDDEN');
+  const expiries=[sourceExpiry(url),source.audioExpiresAt].filter(value=>value!==null);
+  requireThat(expiries.every(value=>typeof value==='string' && Number.isFinite(Date.parse(value))),'QWEN_AUDIO_TTS_EXPIRY_INVALID');
+  const expiresAt=expiries.length?new Date(Math.min(...expiries.map(Date.parse))).toISOString():null;
+  requireThat(!expiresAt || Date.parse(expiresAt)>Date.now(),'QWEN_RECOVERY_SOURCE_EXPIRED');
+  const downloadSource={url:url.href,urlSha256:source.urlSha256,allowedHosts:policy.allowedHosts,mode:'fresh',maxBytes:policy.maxBytes,maxRedirects:0};
+  validateSourceUrl(downloadSource);return {policy,downloadSource,expiresAt};
+ }
+ #audioRecoveryContext(request,approved=false) {
+  this.verify();requireThat(exact(request,['recoveryId','source','outputName']) && id(request.recoveryId) && exact(request.source,['area','relativePath','sha256']) && request.source.area==='work' && /^[a-f0-9]{64}$/.test(request.source.sha256) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.wav$/.test(request.outputName),'QWEN_AUDIO_RECOVERY_REQUEST_INVALID');
+  const bytes=readOrdinary(this.#target('work',request.source.relativePath),32768);requireThat(digest(bytes)===request.source.sha256,'QWEN_RECOVERY_SOURCE_CHANGED');
+  let source;try{source=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw error('QWEN_RECOVERY_SOURCE_INVALID');}
+  requireThat(source.schema==='qwen_audio_tts_source_v1' && source.taskId===this.#binding.taskId && source.bindingSha256===this.#config.bindingSha256 && source.origin===QWEN_ORIGIN && source.requestedModel===QWEN_AUDIO_TTS.model && id(source.operationId) && safeId(source.request_id) && source.apiAuthenticationAllowedForDownload===false && request.source.relativePath===`qwen-media/operation-${source.operationId}/audio-source.json`,'QWEN_RECOVERY_SOURCE_INVALID');
+  const native=jsonFile(path.join(this.#base,`operation-${source.operationId}`,'result.json'),32768);
+  requireThat(native.status==='generated' && native.providerFinished===true && native.finish_reason==='stop' && native.request_id===source.request_id && native.requestedModel===source.requestedModel && native.actualModelIdentity===source.actualModelIdentity && native.reviewedPlanSha256===source.reviewedPlanSha256 && native.sourceContract?.sha256===request.source.sha256,'QWEN_RECOVERY_NATIVE_PROOF_REQUIRED');
+  const url=new URL(source.url);requireThat(source.hostname===url.hostname && source.urlSha256===digest(url.href),'QWEN_RECOVERY_SOURCE_INVALID');
+  const c=this.#audioDownloadSource(source),file=this.#target('outputs',request.outputName),requestSha256=digest(JSON.stringify(request));
+  const plan={schema:'qwen_audio_tts_recovery_plan_v1',taskId:this.#binding.taskId,bindingSha256:this.#config.bindingSha256,effectivePolicySha256:this.#audioPolicySha256(),recoveryId:request.recoveryId,operationId:source.operationId,request_id:source.request_id,requestedModel:source.requestedModel,actualModelIdentity:source.actualModelIdentity,requestSha256,sourceContract:request.source,urlSha256:source.urlSha256,hostname:source.hostname,expiresAt:c.expiresAt,linkExpiryKnown:c.expiresAt!==null,outputName:request.outputName,maxBytes:c.policy.maxBytes,timeoutMs:c.policy.timeoutMs,remainingBudgetNotVerified:c.policy.maxDownloads,networkMode:c.policy.proxy?'loopback-connect':'direct',maxRedirects:0,automaticRetry:false,credentialReads:0,platformRequests:0,generationRequests:0,networkRequests:0,authenticationCopied:false};
+  const planSha256=digest(canonical(plan));
+  if(approved) {
+   const a=c.policy.approvals?.[request.recoveryId];
+   requireThat(a?.maxRequests===1 && Date.parse(a.expiresAt)>Date.now() && a.requestSha256===requestSha256 && a.urlSha256===source.urlSha256 && a.reviewedPlanSha256===planSha256,'QWEN_AUDIO_RECOVERY_REVIEW_REQUIRED');
+  }
+  return {...c,source,native,file,requestSha256,plan:{...plan,planSha256}};
+ }
+ audioRecoveryPlan(request) {return this.#audioRecoveryContext(request).plan;}
+ async recoverAudio(request) {
+  const c=this.#audioRecoveryContext(request,true);requireThat(c.policy.maxDownloads>=1,'QWEN_RECOVERY_BUDGET_EXCEEDED');
+  const dir=this.#reserve(`audio-recovery-${request.recoveryId}`,{requestSha256:c.requestSha256,sourceSha256:request.source.sha256,reviewedPlanSha256:c.plan.planSha256,automaticRetry:false});
+  if(!dir)return {status:'reserved_or_finished',deduplicated:true,automaticRetry:false};
+  const sourceKey=digest(canonical({bindingSha256:this.#config.bindingSha256,operationId:c.source.operationId,request_id:c.source.request_id,kind:'qwenAudioTts'}));
+  if(!this.#reserve(`audio-recovery-source-${sourceKey}`,{recoveryId:request.recoveryId,sourceSha256:request.source.sha256}))return {status:'reserved_or_finished',deduplicated:true,automaticRetry:false};
+  let slot=null;for(let n=1;n<=c.policy.maxDownloads;n++){slot=this.#reserve(`audio-recovery-budget-${n}`,{recoveryId:request.recoveryId,sourceKey});if(slot)break;}
+  requireThat(slot,'QWEN_RECOVERY_BUDGET_EXCEEDED');
+  let result={schema:'qwen_audio_tts_recovery_result_v1',recoveryId:request.recoveryId,operationId:c.source.operationId,request_id:c.source.request_id,requestedModel:c.source.requestedModel,actualModelIdentity:c.native.actualModelIdentity,actualModelIdentityVerified:false,providerFinished:true,sourceContract:request.source,status:'unknown',automaticRetry:false,credentialReads:0,platformRequests:0,generationRequests:0,authenticationCopied:false,modelExecutionVerified:false,technicalDecodeVerified:false,humanListeningVerified:false,businessCompletedVerified:false};
+  try {
+   const downloaded=await this.#download(c.downloadSource,c.file,{proxy:c.policy.proxy??null,timeoutMs:c.policy.timeoutMs,traceFile:path.join(dir,'download-trace.json')});this.verify();
+   const bytes=readOrdinary(c.file,c.policy.maxBytes);requireThat(bytes.length===downloaded.byteLength && digest(bytes)===downloaded.sha256 && downloaded.diskReadbackVerified===true,'QWEN_RECOVERY_DISK_MISMATCH');
+   const audioMetadata=inspectAudioTtsWav(bytes);
+   result={...result,status:'succeeded',output:{relativePath:request.outputName,sha256:downloaded.sha256,byteLength:downloaded.byteLength},audioMetadata,diskReadbackVerified:true,modelExecutionVerified:true};
+  }catch(failure){result.code=safeFailureCode(failure);result.downloadCode=typeof failure?.code==='string' && /^CONTENT_DOWNLOAD_[A-Z_]{1,70}$/.test(failure.code)?failure.code:null;result.partialFilePreserved=fs.existsSync(c.file);}
+  this.#save(path.join(dir,'result.json'),result);return result;
  }
  #recoveryContext(request,automatic=false) {
   this.verify();requireThat(exact(request,['recoveryId','source','outputName']) && id(request.recoveryId) && exact(request.source,['area','relativePath','sha256']) && ['inputs','work'].includes(request.source.area) && /^[a-f0-9]{64}$/.test(request.source.sha256) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.mp4$/.test(request.outputName),'QWEN_RECOVERY_REQUEST_INVALID');

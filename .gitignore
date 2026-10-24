@@ -200,3 +200,5 @@
 !/tests/market-text-revision.integration.mjs
 !/bridge/src/qwen-system-voices.mjs
 !/tests/qwen-system-voices.test.mjs
+!/bridge/src/qwen-audio-tts.mjs
+!/tests/qwen-audio-tts.integration.mjs
